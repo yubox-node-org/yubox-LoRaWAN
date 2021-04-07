@@ -73,6 +73,8 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
         _lw_default_devEUI[i] = (uint8_t)(uniqueId);
         uniqueId >>= 8;
     }
+
+    _ts_errorAfterJoin = 0;
 }
 
 // ESP32 - SX126x pin configuration
@@ -363,22 +365,35 @@ lmh_error_status YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, lmh_confi
 {
     if (!_lw_confExists || _lw_needsInit) return LMH_ERROR;
 
+    if (lmh_join_status_get() != LMH_SET) return LMH_ERROR;
+
     lmh_app_data_t m_lora_app_data = {p, n, LORAWAN_APP_PORT, 0, 0};
 
     lmh_error_status main_err = lmh_send(&m_lora_app_data, is_txconfirmed);
 
     if (main_err != LMH_SUCCESS) {
-        /**
-         * NOTA: por Alex Villacís Lasso 2020/11/24
-         * En caso de que falle el envío, probablemente es porque no se ha negociado
-         * todavía una longitud máxima de payload, lo cual depende de la calidad de radio.
-         * El mecanismo de negociación consiste en intentar enviar un paquete LoRaWAN de
-         * longitud cero, lo cual permite negociar un payload mayor según se reciba o no
-         * en el gateway.
-         */
-        m_lora_app_data.port = LORAWAN_APP_PORT;
-        m_lora_app_data.buffsize = 0;
-        lmh_send(&m_lora_app_data, LMH_UNCONFIRMED_MSG);
+        uint32_t t = millis();
+        if (_ts_errorAfterJoin == 0) _ts_errorAfterJoin = t;
+
+        if (t - _ts_errorAfterJoin >= 90 * 1000) {
+            ESP_LOGW(__FILE__, "No hay transmisión exitosa luego de timeout, se reintenta join...");
+            _ts_errorAfterJoin = 0;
+            _lw_needsInit = true;
+        } else {
+            /**
+             * NOTA: por Alex Villacís Lasso 2020/11/24
+             * En caso de que falle el envío, probablemente es porque no se ha negociado
+             * todavía una longitud máxima de payload, lo cual depende de la calidad de radio.
+             * El mecanismo de negociación consiste en intentar enviar un paquete LoRaWAN de
+             * longitud cero, lo cual permite negociar un payload mayor según se reciba o no
+             * en el gateway.
+             */
+            m_lora_app_data.port = LORAWAN_APP_PORT;
+            m_lora_app_data.buffsize = 0;
+            lmh_error_status recv_err = lmh_send(&m_lora_app_data, LMH_CONFIRMED_MSG);
+        }
+    } else {
+        _ts_errorAfterJoin = 0;
     }
 
     return main_err;

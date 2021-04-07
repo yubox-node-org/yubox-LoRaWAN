@@ -38,6 +38,11 @@ private:
   bool _lw_confExists;
   bool _lw_needsInit;
 
+  // Si ocurre un error de TX LUEGO de que se recibe la indicación de
+  // JOIN a la red, se asigna este valor. Este valor se vuelve a poner
+  // a cero luego de cada transmisión exitosa.
+  uint32_t _ts_errorAfterJoin;
+
   // La siguiente estructura necesita existir por toda la vida de la sesión LoRaWAN
   lmh_callback_t _lora_callbacks;
 
