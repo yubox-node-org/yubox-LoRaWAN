@@ -1,6 +1,10 @@
 function setupLoRaWANTab()
 {
     var lorawanpane = getYuboxPane('lorawan');
+    var data = {
+        'sse': null
+    };
+    lorawanpane.data(data);
 
     lorawanpane.find('input#deviceEUI, input#appEUI, input#appKey').blur(function() {
         var txt = $(this);
@@ -56,7 +60,7 @@ function setupLoRaWANTab()
             var lorawanpane = getYuboxPane('lorawan');
             var span_connstatus = lorawanpane.find('form span#lorawan_connstatus');
 
-            span_connstatus.removeClass('badge-danger badge-success badge-secondary');
+            span_connstatus.removeClass('badge-danger badge-warning badge-success badge-secondary');
             if (data.netjoined) {
                 span_connstatus
                     .addClass('badge-success')
@@ -76,8 +80,52 @@ function setupLoRaWANTab()
             lorawanpane.find('input#appKey').val((data.appKey == undefined) ? '' : lorawan_formatEUI(data.appKey));
         })
         .fail(function (e) { yuboxStdAjaxFailHandler(e); });
+
+        if (!!window.EventSource) {
+            var sse = new EventSource(yuboxAPI('lorawan')+'/status');
+            sse.onmessage = function(e) {
+                var data = $.parseJSON(e.data);
+
+                var lorawanpane = getYuboxPane('lorawan');
+                var span_connstatus = lorawanpane.find('form span#lorawan_connstatus');
+
+                span_connstatus.removeClass('badge-danger badge-warning badge-success badge-secondary');
+                if (data.join == 'RESET') {
+                    span_connstatus
+                        .addClass('badge-secondary')
+                        .text('NO CONECTADO');
+                } else if (data.join == 'FAILEd') {
+                    span_connstatus
+                        .addClass('badge-danger')
+                        .text('FALLO CONEXIÓN');
+                } else if (data.join == 'ONGOING') {
+                    span_connstatus
+                        .addClass('badge-warning')
+                        .text('CONECTANDO...');
+                } else if (data.join == 'SET') {
+                    span_connstatus
+                        .addClass('badge-success')
+                        .text('CONECTADO');
+                }
+
+                lorawanpane.find('div.lorawan-stats#rx').text(lorawan_format_tsactivity(data.rx, data.ts));
+                lorawanpane.find('div.lorawan-stats#tx_ok').text(lorawan_format_tsactivity(data.tx_ok, data.ts));
+                lorawanpane.find('div.lorawan-stats#tx_fail').text(lorawan_format_tsactivity(data.tx_fail, data.ts));
+            }
+            sse.addEventListener('error', function (e) {
+                yuboxMostrarAlertText('danger', 'Se ha perdido conexión con dispositivo para monitoreo LoRaWAN');
+            });
+            lorawanpane.data('sse', sse);
+        } else {
+            yuboxMostrarAlertText('danger', 'Este navegador no soporta Server-Sent Events, no se puede monitorear LoRaWAN.');
+        }
     })
     .on('hide.bs.tab', function (e) {
+        var lorawanpane = getYuboxPane('lorawan');
+        if (lorawanpane.data('sse') != null) {
+            lorawanpane.data('sse').close();
+            lorawanpane.data('sse', null);
+        }
     });
 
     lorawanpane.find('button[name=apply]').click(function () {
@@ -102,6 +150,13 @@ function setupLoRaWANTab()
         })
         .fail(function (e) { yuboxStdAjaxFailHandler(e); });
     });
+}
+
+function lorawan_format_tsactivity(t, ts_now)
+{
+    if (t == null) return '--';
+    var d = new Date((new Date()).getTime() - (ts_now - t));
+    return d.toLocaleString();
 }
 
 function lorawan_genEUI(n)
