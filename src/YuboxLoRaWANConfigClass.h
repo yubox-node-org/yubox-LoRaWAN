@@ -46,11 +46,21 @@ private:
   // La siguiente estructura necesita existir por toda la vida de la sesión LoRaWAN
   lmh_callback_t _lora_callbacks;
 
+  AsyncEventSource * _pEvents;
+
+  // Timestamps de últimas actividades LoRaWAN
+  uint32_t _ts_ultimoTX_OK;
+  uint32_t _ts_ultimoTX_FAIL;
+  uint32_t _ts_ultimoRX;
+
   void _loadSavedCredentialsFromNVRAM(void);
   bool _saveCredentialsToNVRAM(void);
 
   void _setupHTTPRoutes(AsyncWebServer &);
 
+  String _reportActivityJSON(void);
+
+  void _routeHandler_yuboxAPI_lorawan_status_onConnect(AsyncEventSourceClient *);
   void _routeHandler_yuboxAPI_lorawanconfigjson_GET(AsyncWebServerRequest *);
   void _routeHandler_yuboxAPI_lorawanconfigjson_POST(AsyncWebServerRequest *);
 
@@ -83,7 +93,9 @@ public:
   lmh_error_status send(uint8_t * p, uint8_t n, lmh_confirm is_txconfirmed = LMH_UNCONFIRMED_MSG);
 
   // NO LLAMAR DESDE CÓDIGO LAS SIGUIENTES FUNCIONES
+  void _joinstart_handler(void);
   void _join_handler(void);
+  void _joinfail_handler(void);
   void _rx_handler(uint8_t *, uint8_t);
 };
 

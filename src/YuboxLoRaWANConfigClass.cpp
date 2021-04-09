@@ -75,6 +75,10 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     }
 
     _ts_errorAfterJoin = 0;
+    _pEvents = NULL;
+    _ts_ultimoTX_OK = 0;
+    _ts_ultimoTX_FAIL = 0;
+    _ts_ultimoRX = 0;
 }
 
 // ESP32 - SX126x pin configuration
@@ -142,6 +146,35 @@ void YuboxLoRaWANConfigClass::_setupHTTPRoutes(AsyncWebServer & srv)
 {
   srv.on("/yubox-api/lorawan/config.json", HTTP_GET, std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET, this, std::placeholders::_1));
   srv.on("/yubox-api/lorawan/config.json", HTTP_POST, std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST, this, std::placeholders::_1));
+  _pEvents = new AsyncEventSource("/yubox-api/lorawan/status");
+  YuboxWebAuth.addManagedHandler(_pEvents);
+  srv.addHandler(_pEvents);
+  _pEvents->onConnect(std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawan_status_onConnect, this, std::placeholders::_1));
+}
+
+String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
+{
+    DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(5));
+    switch (lmh_join_status_get()) {
+    case LMH_RESET:     json_doc["join"] = "RESET"; break;
+    case LMH_SET:       json_doc["join"] = "SET"; break;
+    case LMH_ONGOING:   json_doc["join"] = "ONGOING"; break;
+    case LMH_FAILED:    json_doc["join"] = "FAILED"; break;
+    }
+    if (_ts_ultimoTX_OK != 0) json_doc["tx_ok"] = _ts_ultimoTX_OK; else json_doc["tx_ok"] = (const char *)NULL;
+    if (_ts_ultimoTX_FAIL != 0) json_doc["tx_fail"] = _ts_ultimoTX_FAIL; else json_doc["tx_fail"] = (const char *)NULL;
+    if (_ts_ultimoRX != 0) json_doc["rx"] = _ts_ultimoRX; else json_doc["rx"] = (const char *)NULL;
+    json_doc["ts"] = millis();
+
+    String json_str;
+    serializeJson(json_doc, json_str);
+    return json_str;
+}
+
+void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawan_status_onConnect(AsyncEventSourceClient * c)
+{
+    String json_str = _reportActivityJSON();
+    c->send(json_str.c_str());
 }
 
 void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(AsyncWebServerRequest * request)
@@ -350,14 +383,33 @@ void YuboxLoRaWANConfigClass::update(void)
         uint32_t err_code = lmh_init(&_lora_callbacks, lora_param_init, true);
         if (err_code != 0) {
             ESP_LOGE(__FILE__, "lmh_init failed - %d\r\n", err_code);
+            _joinfail_handler();
         } else if (!lmh_setSubBandChannels(_lw_subband)) {
             ESP_LOGE(__FILE__, "lmh_setSubBandChannels(%d) failed. Wrong sub band requested?\r\n", _lw_subband);
+            _joinfail_handler();
         } else {
             ESP_LOGI(__FILE__, "Starting join LoRaWAN network...\r\n");
             lmh_join();
+            _joinstart_handler();
         }
     } else {
         Radio.IrqProcess();
+    }
+}
+
+void YuboxLoRaWANConfigClass::_joinstart_handler(void)
+{
+    if (_pEvents != NULL && _pEvents->count() > 0) {
+        String json_str = _reportActivityJSON();
+        _pEvents->send(json_str.c_str());
+    }
+}
+
+void YuboxLoRaWANConfigClass::_joinfail_handler(void)
+{
+    if (_pEvents != NULL && _pEvents->count() > 0) {
+        String json_str = _reportActivityJSON();
+        _pEvents->send(json_str.c_str());
     }
 }
 
@@ -373,6 +425,7 @@ lmh_error_status YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, lmh_confi
 
     if (main_err != LMH_SUCCESS) {
         uint32_t t = millis();
+        _ts_ultimoTX_FAIL = t;
         if (_ts_errorAfterJoin == 0) _ts_errorAfterJoin = t;
 
         if (t - _ts_errorAfterJoin >= 90 * 1000) {
@@ -394,6 +447,12 @@ lmh_error_status YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, lmh_confi
         }
     } else {
         _ts_errorAfterJoin = 0;
+        _ts_ultimoTX_OK = millis();
+    }
+
+    if (_pEvents != NULL && _pEvents->count() > 0) {
+        String json_str = _reportActivityJSON();
+        _pEvents->send(json_str.c_str());
     }
 
     return main_err;
@@ -485,6 +544,11 @@ void YuboxLoRaWANConfigClass::removeRX(yuboxlorawan_event_id_t id)
 
 void YuboxLoRaWANConfigClass::_join_handler(void)
 {
+    if (_pEvents != NULL && _pEvents->count() > 0) {
+        String json_str = _reportActivityJSON();
+        _pEvents->send(json_str.c_str());
+    }
+
     for (auto i = 0; i < cbRXList.size(); i++) {
         YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
         if (entry.event_type == YBX_LW_NETJOIN && (entry.j_cb || entry.j_fcb)) {
@@ -499,6 +563,7 @@ void YuboxLoRaWANConfigClass::_join_handler(void)
 
 void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n)
 {
+    _ts_ultimoRX = millis();
     for (auto i = 0; i < cbRXList.size(); i++) {
         YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
         if (entry.event_type == YBX_LW_RX && (entry.rx_cb || entry.rx_fcb)) {
@@ -508,6 +573,11 @@ void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n)
                 entry.rx_fcb(p, n);
             }
         }
+    }
+
+    if (_pEvents != NULL && _pEvents->count() > 0) {
+        String json_str = _reportActivityJSON();
+        _pEvents->send(json_str.c_str());
     }
 }
 
@@ -536,7 +606,9 @@ static void lorawan_has_joined_handler(void)
 static void lorawan_join_failed_handler(void)
 {
     ESP_LOGE(__FILE__, "OVER_THE_AIR_ACTIVATION failed! Retrying...\r\n");
+    YuboxLoRaWANConf._joinfail_handler();
     lmh_join();
+    YuboxLoRaWANConf._joinstart_handler();
 }
 
 static void lorawan_rx_handler(lmh_app_data_t *app_data)
