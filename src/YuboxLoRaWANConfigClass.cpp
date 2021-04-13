@@ -443,7 +443,7 @@ lmh_error_status YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, lmh_confi
              */
             m_lora_app_data.port = LORAWAN_APP_PORT;
             m_lora_app_data.buffsize = 0;
-            lmh_error_status recv_err = lmh_send(&m_lora_app_data, LMH_CONFIRMED_MSG);
+            lmh_error_status recv_err = lmh_send(&m_lora_app_data, LMH_UNCONFIRMED_MSG);
         }
     } else {
         _ts_errorAfterJoin = 0;
