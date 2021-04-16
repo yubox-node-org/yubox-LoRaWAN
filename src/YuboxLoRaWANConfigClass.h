@@ -25,6 +25,9 @@ class YuboxLoRaWANConfigClass
 private:
   static const char * _ns_nvram_yuboxframework_lorawan;
 
+  // Región de LoRaWAN a usar para configuración
+  LoRaMacRegion_t _lw_region;
+
   // Sub-banda a usar para conexión inicial a red
   unsigned int _lw_subband;
 

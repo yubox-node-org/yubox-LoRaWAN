@@ -49,6 +49,7 @@ static void lorawan_join_failed_handler(void);
 
 YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
 {
+    _lw_region = LORAMAC_REGION_US915;  // <-- TODO: volver configurable
     _lw_subband = 1;
     memset(_lw_devEUI, 0, sizeof(_lw_devEUI));
     memset(_lw_appEUI, 0, sizeof(_lw_appEUI));
@@ -184,33 +185,38 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
   AsyncResponseStream *response = request->beginResponseStream("application/json");
   DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(7));
 
-#ifdef REGION_US915
+  switch (_lw_region) {
+  case LORAMAC_REGION_US915:
     json_doc["region"] = "US 915 MHz";
-#endif
-#ifdef REGION_AS923
+    break;
+  case LORAMAC_REGION_US915_HYBRID:
+    json_doc["region"] = "US 915 MHz (hybrid)";
+    break;
+  case LORAMAC_REGION_AS923:
     json_doc["region"] = "Asia 923 MHz";
-#endif
-#ifdef REGION_AU915
+    break;
+  case LORAMAC_REGION_AU915:
     json_doc["region"] = "Australia 915 MHz";
-#endif
-#ifdef REGION_CN470
+    break;
+  case LORAMAC_REGION_CN470:
     json_doc["region"] = "China 470 MHz";
-#endif
-#ifdef REGION_CN779
+    break;
+  case LORAMAC_REGION_CN779:
     json_doc["region"] = "China 779 MHz";
-#endif
-#ifdef REGION_EU433
+    break;
+  case LORAMAC_REGION_EU433:
     json_doc["region"] = "Europe 433 MHz";
-#endif
-#ifdef REGION_EU868
+    break;
+  case LORAMAC_REGION_EU868:
     json_doc["region"] = "Europe 868 MHz";
-#endif
-#ifdef REGION_IN865
+    break;
+  case LORAMAC_REGION_IN865:
     json_doc["region"] = "India 865 MHz";
-#endif
-#ifdef REGION_KR920
+    break;
+  case LORAMAC_REGION_KR920:
     json_doc["region"] = "Korea 920 MHz";
-#endif
+    break;
+    }
     String s_default_devEUI = _bin2str(_lw_default_devEUI, sizeof(_lw_default_devEUI));
     String s_devEUI = _lw_confExists ? _bin2str(_lw_devEUI, sizeof(_lw_devEUI)) : s_default_devEUI;
     String s_appEUI = _lw_confExists ? _bin2str(_lw_appEUI, sizeof(_lw_appEUI)) : "";
@@ -380,7 +386,7 @@ void YuboxLoRaWANConfigClass::update(void)
             LORAWAN_DUTYCYCLE_OFF
         };
 
-        uint32_t err_code = lmh_init(&_lora_callbacks, lora_param_init, true);
+        uint32_t err_code = lmh_init(&_lora_callbacks, lora_param_init, true, CLASS_A, _lw_region);
         if (err_code != 0) {
             ESP_LOGE(__FILE__, "lmh_init failed - %d\r\n", err_code);
             _joinfail_handler();
@@ -393,7 +399,8 @@ void YuboxLoRaWANConfigClass::update(void)
             _joinstart_handler();
         }
     } else {
-        Radio.IrqProcess();
+        // En versión 2.0.0+ el proceso de IRQ se mueve a tarea separada
+        //Radio.IrqProcess();
     }
 }
 
