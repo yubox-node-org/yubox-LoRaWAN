@@ -172,8 +172,8 @@ void send_lora_frame(void)
       }
 
       Serial.printf("INFO: enviando payload (%d bytes)... ", payloadlen);
-      lmh_error_status error = YuboxLoRaWANConf.send(/*buffer*/payload, payloadlen);
+      bool ok = YuboxLoRaWANConf.send(/*buffer*/payload, payloadlen);
       str_payload = "";
-      Serial.println((error == LMH_SUCCESS) ? "OK" : "ERR");
+      Serial.println(ok ? "OK" : "ERR");
     }
 }

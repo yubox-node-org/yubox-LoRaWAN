@@ -425,15 +425,15 @@ bool YuboxLoRaWANConfigClass::isJoined(void)
     return (LMH_SET == lmh_join_status_get());
 }
 
-lmh_error_status YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, lmh_confirm is_txconfirmed)
+bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
 {
-    if (!_lw_confExists || _lw_needsInit) return LMH_ERROR;
+    if (!_lw_confExists || _lw_needsInit) return false;
 
-    if (lmh_join_status_get() != LMH_SET) return LMH_ERROR;
+    if (lmh_join_status_get() != LMH_SET) return false;
 
     lmh_app_data_t m_lora_app_data = {p, n, LORAWAN_APP_PORT, 0, 0};
 
-    lmh_error_status main_err = lmh_send(&m_lora_app_data, is_txconfirmed);
+    lmh_error_status main_err = lmh_send(&m_lora_app_data, is_txconfirmed ? LMH_CONFIRMED_MSG : LMH_UNCONFIRMED_MSG);
 
     if (main_err != LMH_SUCCESS) {
         uint32_t t = millis();
@@ -467,7 +467,7 @@ lmh_error_status YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, lmh_confi
         _pEvents->send(json_str.c_str());
     }
 
-    return main_err;
+    return (main_err == LMH_SUCCESS);
 }
 
 yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onJoin(YuboxLoRaWAN_join_cb cbJ)

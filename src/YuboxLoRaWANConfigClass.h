@@ -93,7 +93,7 @@ public:
   void removeRX(yuboxlorawan_event_id_t id);
 
   // Enviar datos una vez confirmado que hay enlace a red
-  lmh_error_status send(uint8_t * p, uint8_t n, lmh_confirm is_txconfirmed = LMH_UNCONFIRMED_MSG);
+  bool send(uint8_t * p, uint8_t n, bool is_txconfirmed = false);
 
   // NO LLAMAR DESDE CÓDIGO LAS SIGUIENTES FUNCIONES
   void _joinstart_handler(void);
