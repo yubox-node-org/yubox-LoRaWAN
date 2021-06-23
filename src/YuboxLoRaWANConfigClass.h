@@ -78,7 +78,7 @@ public:
   void update(void);
 
   // Verificar si efectivamente ya se ha unido a red LoRaWAN
-  lmh_join_status joinStatus(void) { return lmh_join_status_get(); }
+  bool isJoined(void);
 
   // Instalar callback para aviso de unión exitosa a LoRaWAN
   yuboxlorawan_event_id_t onJoin(YuboxLoRaWAN_join_cb cbRX);

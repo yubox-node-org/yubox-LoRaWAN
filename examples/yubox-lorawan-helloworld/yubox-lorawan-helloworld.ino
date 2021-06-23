@@ -160,7 +160,7 @@ void lorawan_payload(AsyncWebServerRequest * request)
 
 void send_lora_frame(void)
 {
-    if (YuboxLoRaWANConf.joinStatus() != LMH_SET) {
+    if (!YuboxLoRaWANConf.isJoined()) {
       //Serial.println("WARN: todavía no se une a una red LoRaWAN...");
     } else {
       const char * test_payload = "Hola mundo";

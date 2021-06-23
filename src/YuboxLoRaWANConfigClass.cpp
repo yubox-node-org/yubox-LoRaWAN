@@ -420,6 +420,11 @@ void YuboxLoRaWANConfigClass::_joinfail_handler(void)
     }
 }
 
+bool YuboxLoRaWANConfigClass::isJoined(void)
+{
+    return (LMH_SET == lmh_join_status_get());
+}
+
 lmh_error_status YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, lmh_confirm is_txconfirmed)
 {
     if (!_lw_confExists || _lw_needsInit) return LMH_ERROR;
