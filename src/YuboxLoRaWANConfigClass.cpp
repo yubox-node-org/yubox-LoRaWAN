@@ -2,7 +2,7 @@
 
 #include "YuboxWebAuthClass.h"
 
-#include <LoRaWan-Arduino.h>
+#include <lorawan.h>
 #include <SPI.h>
 #include "YuboxLoRaWANConfigClass.h"
 
@@ -16,6 +16,12 @@
 #include "ArduinoJson.h"
 
 #define JOINREQ_NBTRIALS 3         /**< Number of trials for the join request. */
+
+// Constantes para estado de join de red
+#define YBX_JOIN_FAIL       -1
+#define YBX_JOIN_NONE       0
+#define YBX_JOIN_ONGOING    1
+#define YBX_JOIN_SUCCESS    2
 
 typedef enum {
   YBX_LW_NETJOIN = 0,
@@ -42,14 +48,8 @@ static std::vector<YuboxLoRaWAN_rx_List_t> cbRXList;
 
 const char * YuboxLoRaWANConfigClass::_ns_nvram_yuboxframework_lorawan = "YUBOX/LoRaWAN";
 
-static void lorawan_has_joined_handler(void);
-static void lorawan_rx_handler(lmh_app_data_t *app_data);
-static void lorawan_confirm_class_handler(DeviceClass_t Class);
-static void lorawan_join_failed_handler(void);
-
 YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
 {
-    _lw_region = LORAMAC_REGION_US915;  // <-- TODO: volver configurable
     _lw_subband = 1;
     memset(_lw_devEUI, 0, sizeof(_lw_devEUI));
     memset(_lw_appEUI, 0, sizeof(_lw_appEUI));
@@ -57,17 +57,8 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     memset(_lw_default_devEUI, 0, sizeof(_lw_default_devEUI));
     _lw_confExists = false;
     _lw_needsInit = true;
-
-    lmh_callback_t lora_callbacks = {
-        BoardGetBatteryLevel,
-        BoardGetUniqueId,
-        BoardGetRandomSeed,
-        lorawan_rx_handler,
-        lorawan_has_joined_handler,
-        lorawan_confirm_class_handler,
-        lorawan_join_failed_handler
-    };
-    _lora_callbacks = lora_callbacks;
+    _join_status = YBX_JOIN_NONE;
+    _ts_ultimoJoin_FAIL = 0;
 
     uint64_t uniqueId = ESP.getEfuseMac();
     for (auto i = 0; i < 8; i++) {
@@ -82,41 +73,24 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     _ts_ultimoRX = 0;
 }
 
-// ESP32 - SX126x pin configuration
-const int PIN_LORA_RESET = 33;  // LORA RESET
-const int PIN_LORA_NSS = 5;  // LORA SPI CS
-const int PIN_LORA_SCLK = 18;  // LORA SPI CLK
-const int PIN_LORA_MISO = 19;  // LORA SPI MISO
-const int PIN_LORA_DIO_1 = 39; // LORA DIO_1
-const int PIN_LORA_BUSY = 34;  // LORA SPI BUSY
-const int PIN_LORA_MOSI = 23;  // LORA SPI MOSI
-const int RADIO_TXEN = 26;   // LORA ANTENNA TX ENABLE
-const int RADIO_RXEN = 27;   // LORA ANTENNA RX ENABLE
+// Las constantes RST_LoRa, DIO[0,1,2] se definen para el board heltec_wifi_lora_32_V2
+// La definición siguiente DEBE EXISTIR para que el programa compile con la biblioteca Beelan-LoRaWAN
+const sRFM_pins RFM_pins = {
+  .CS = SS,
+  .RST = RST_LoRa,
+  .DIO0 = DIO0,
+  .DIO1 = DIO1,
+  .DIO2 = DIO2,
+  .DIO5 = -1, // NOOP
+};
 
 void YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv)
 {
     _loadSavedCredentialsFromNVRAM();
     _setupHTTPRoutes(srv);
 
-    hw_config hwConfig;
-    // Define the HW configuration between MCU and SX126x
-    hwConfig.CHIP_TYPE = SX1262_CHIP;      // Example uses an eByte E22 module with an SX1262
-    hwConfig.PIN_LORA_RESET = PIN_LORA_RESET; // LORA RESET
-    hwConfig.PIN_LORA_NSS = PIN_LORA_NSS;   // LORA SPI CS
-    hwConfig.PIN_LORA_SCLK = PIN_LORA_SCLK;   // LORA SPI CLK
-    hwConfig.PIN_LORA_MISO = PIN_LORA_MISO;   // LORA SPI MISO
-    hwConfig.PIN_LORA_DIO_1 = PIN_LORA_DIO_1; // LORA DIO_1
-    hwConfig.PIN_LORA_BUSY = PIN_LORA_BUSY;   // LORA SPI BUSY
-    hwConfig.PIN_LORA_MOSI = PIN_LORA_MOSI;   // LORA SPI MOSI
-    hwConfig.RADIO_TXEN = RADIO_TXEN;      // LORA ANTENNA TX ENABLE
-    hwConfig.RADIO_RXEN = RADIO_RXEN;      // LORA ANTENNA RX ENABLE
-    hwConfig.USE_DIO2_ANT_SWITCH = false;
-    hwConfig.USE_DIO3_TCXO = true;        // Example uses an CircuitRocks Alora RFM1262 which uses DIO3 to control oscillator voltage
-    hwConfig.USE_DIO3_ANT_SWITCH = false;   // Only Insight ISP4520 module uses DIO3 as antenna control
-
-    uint32_t err_code = lora_hardware_init(hwConfig);
-    if (err_code != 0) {
-        ESP_LOGE(__FILE__, "lora_hardware_init failed - %d\r\n", err_code);
+    if (!lora.init()) {
+        ESP_LOGE(__FILE__, "lora_hardware_init failed\r\n");
     }
 }
 
@@ -156,12 +130,14 @@ void YuboxLoRaWANConfigClass::_setupHTTPRoutes(AsyncWebServer & srv)
 String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
 {
     DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(5));
-    switch (lmh_join_status_get()) {
-    case LMH_RESET:     json_doc["join"] = "RESET"; break;
-    case LMH_SET:       json_doc["join"] = "SET"; break;
-    case LMH_ONGOING:   json_doc["join"] = "ONGOING"; break;
-    case LMH_FAILED:    json_doc["join"] = "FAILED"; break;
+
+    switch (_join_status) {
+    case YBX_JOIN_NONE:     json_doc["join"] = "RESET"; break;
+    case YBX_JOIN_ONGOING:  json_doc["join"] = "ONGOING"; break;
+    case YBX_JOIN_SUCCESS:  json_doc["join"] = "SET"; break;
+    case YBX_JOIN_FAIL:     json_doc["join"] = "FAILED"; break;
     }
+
     if (_ts_ultimoTX_OK != 0) json_doc["tx_ok"] = _ts_ultimoTX_OK; else json_doc["tx_ok"] = (const char *)NULL;
     if (_ts_ultimoTX_FAIL != 0) json_doc["tx_fail"] = _ts_ultimoTX_FAIL; else json_doc["tx_fail"] = (const char *)NULL;
     if (_ts_ultimoRX != 0) json_doc["rx"] = _ts_ultimoRX; else json_doc["rx"] = (const char *)NULL;
@@ -185,38 +161,18 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
   AsyncResponseStream *response = request->beginResponseStream("application/json");
   DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(7));
 
-  switch (_lw_region) {
-  case LORAMAC_REGION_US915:
-    json_doc["region"] = "US 915 MHz";
-    break;
-  case LORAMAC_REGION_US915_HYBRID:
-    json_doc["region"] = "US 915 MHz (hybrid)";
-    break;
-  case LORAMAC_REGION_AS923:
-    json_doc["region"] = "Asia 923 MHz";
-    break;
-  case LORAMAC_REGION_AU915:
-    json_doc["region"] = "Australia 915 MHz";
-    break;
-  case LORAMAC_REGION_CN470:
-    json_doc["region"] = "China 470 MHz";
-    break;
-  case LORAMAC_REGION_CN779:
-    json_doc["region"] = "China 779 MHz";
-    break;
-  case LORAMAC_REGION_EU433:
-    json_doc["region"] = "Europe 433 MHz";
-    break;
-  case LORAMAC_REGION_EU868:
-    json_doc["region"] = "Europe 868 MHz";
-    break;
-  case LORAMAC_REGION_IN865:
-    json_doc["region"] = "India 865 MHz";
-    break;
-  case LORAMAC_REGION_KR920:
-    json_doc["region"] = "Korea 920 MHz";
-    break;
-    }
+#if defined(US_915)
+  json_doc["region"] = "US 915 MHz";
+#elif defined (AU_915)
+  json_doc["region"] = "Australia 915 MHz";
+#elif defined (AS_923)
+  json_doc["region"] = "Asia 923 MHz";
+#elif defined (EU_868)
+  json_doc["region"] = "Europe 868 MHz";
+#else
+  #error No LoRaWAN region defined in Config.h
+#endif
+
     String s_default_devEUI = _bin2str(_lw_default_devEUI, sizeof(_lw_default_devEUI));
     String s_devEUI = _lw_confExists ? _bin2str(_lw_devEUI, sizeof(_lw_devEUI)) : s_default_devEUI;
     String s_appEUI = _lw_confExists ? _bin2str(_lw_appEUI, sizeof(_lw_appEUI)) : "";
@@ -225,8 +181,28 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
     json_doc["deviceEUI"] = s_devEUI.c_str();
     json_doc["appEUI"] = s_appEUI.c_str();
     json_doc["appKey"] = s_appKey.c_str();
-    json_doc["subband"] = _lw_subband;
-    json_doc["netjoined"] = (lmh_join_status_get() == LMH_SET);
+#if defined(SUBND_0)
+  json_doc["subband"] = 0;
+#elif defined(SUBND_1)
+  json_doc["subband"] = 1;
+#elif defined(SUBND_2)
+  json_doc["subband"] = 2;
+#elif defined(SUBND_3)
+  json_doc["subband"] = 3;
+#elif defined(SUBND_4)
+  json_doc["subband"] = 4;
+#elif defined(SUBND_5)
+  json_doc["subband"] = 5;
+#elif defined(SUBND_6)
+  json_doc["subband"] = 6;
+#elif defined(SUBND_1)
+  json_doc["subband"] = 7;
+#else
+  // No hay sub-banda para región
+  json_doc["subband"] = 0;
+#endif
+
+  json_doc["netjoined"] = (_join_status == YBX_JOIN_SUCCESS);
 
     serializeJson(json_doc, *response);
     request->send(response);
@@ -290,6 +266,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
         memcpy(_lw_devEUI, n_deviceEUI, sizeof(_lw_devEUI));
         memcpy(_lw_appEUI, n_appEUI, sizeof(_lw_appEUI));
         memcpy(_lw_appKey, n_appKey, sizeof(_lw_appKey));
+        // No hay soporte de sub-banda en biblioteca
         _lw_subband = n_subband;
 
         serverError = !_saveCredentialsToNVRAM();
@@ -370,37 +347,74 @@ void YuboxLoRaWANConfigClass::update(void)
 
     if (_lw_needsInit) {
         _lw_needsInit = false;
+        _join_status = YBX_JOIN_NONE;
+
+        _ts_ultimoJoin_FAIL = 0;
+        if (!lora.init()) {
+            ESP_LOGE(__FILE__, "lora.init failed\r\n");
+            _join_status = YBX_JOIN_FAIL;
+            _joinfail_handler();
+            return;
+        }
+
+        // Set LoRaWAN Class change CLASS_A or CLASS_C
+        lora.setDeviceClass(CLASS_A);
+
+        // Set Data Rate
+        // NOTA: la biblioteca no soporta ADR
+        lora.setDataRate(SF9BW125);
+
+        // Biblioteca no soporta elegir sub-banda en tiempo de ejecución
+
+        // set channel to random
+        lora.setChannel(MULTI);
 
         // Setup the EUIs and Keys
-        lmh_setDevEui(_lw_devEUI);
-        lmh_setAppEui(_lw_appEUI);
-        lmh_setAppKey(_lw_appKey);
+        lora.setDevEUI(_bin2str(_lw_devEUI, sizeof(_lw_devEUI)).c_str());
+        lora.setAppEUI(_bin2str(_lw_appEUI, sizeof(_lw_appEUI)).c_str());
+        lora.setAppKey(_bin2str(_lw_appKey, sizeof(_lw_appKey)).c_str());
 
-        lmh_param_t lora_param_init = {
-            LORAWAN_ADR_ON,
-            LORAWAN_DEFAULT_DATARATE,
-            LORAWAN_PUBLIC_NETWORK,
-            //LORAWAN_PRIVAT_NETWORK,
-            JOINREQ_NBTRIALS,
-            LORAWAN_DEFAULT_TX_POWER,
-            LORAWAN_DUTYCYCLE_OFF
-        };
+        ESP_LOGI(__FILE__, "Starting join LoRaWAN network...\r\n");
+        _join_status = YBX_JOIN_ONGOING;
+        _joinstart_handler();
 
-        uint32_t err_code = lmh_init(&_lora_callbacks, lora_param_init, true, CLASS_A, _lw_region);
-        if (err_code != 0) {
-            ESP_LOGE(__FILE__, "lmh_init failed - %d\r\n", err_code);
-            _joinfail_handler();
-        } else if (!lmh_setSubBandChannels(_lw_subband)) {
-            ESP_LOGE(__FILE__, "lmh_setSubBandChannels(%d) failed. Wrong sub band requested?\r\n", _lw_subband);
-            _joinfail_handler();
+        // TODO: llamada bloqueante por 6 segundos
+        if (lora.join()) {
+            _join_status = YBX_JOIN_SUCCESS;
+            _join_handler();
         } else {
-            ESP_LOGI(__FILE__, "Starting join LoRaWAN network...\r\n");
-            lmh_join();
-            _joinstart_handler();
+            _join_status = YBX_JOIN_FAIL;
+            _ts_ultimoJoin_FAIL = millis();
+            _joinfail_handler();
         }
     } else {
-        // En versión 2.0.0+ el proceso de IRQ se mueve a tarea separada
-        //Radio.IrqProcess();
+        if (_join_status == YBX_JOIN_SUCCESS) {
+            lora.update();
+
+            // No hay un callback para recepción
+            // No hay manera de constreñir la máxima longitud de búfer
+            uint8_t rxbuffer[MAX_DOWNLINK_PAYLOAD_SIZE];
+            uint8_t recvLen = lora.readData((char *)rxbuffer);
+            if (recvLen > 0) {
+                _rx_handler(rxbuffer, recvLen);
+            }
+        } else {
+            if (_join_status == YBX_JOIN_FAIL && _ts_ultimoJoin_FAIL != 0 && millis() - _ts_ultimoJoin_FAIL >= 10000) {
+                ESP_LOGI(__FILE__, "Starting join LoRaWAN network...\r\n");
+                _join_status = YBX_JOIN_ONGOING;
+                _joinstart_handler();
+
+                // TODO: llamada bloqueante por 6 segundos
+                if (lora.join()) {
+                    _join_status = YBX_JOIN_SUCCESS;
+                    _join_handler();
+                } else {
+                    _join_status = YBX_JOIN_FAIL;
+                    _ts_ultimoJoin_FAIL = millis();
+                    _joinfail_handler();
+                }
+            }
+        }
     }
 }
 
@@ -422,52 +436,32 @@ void YuboxLoRaWANConfigClass::_joinfail_handler(void)
 
 bool YuboxLoRaWANConfigClass::isJoined(void)
 {
-    return (LMH_SET == lmh_join_status_get());
+    return (YBX_JOIN_SUCCESS == _join_status);
 }
+
+#ifndef LORAWAN_APP_PORT
+#define LORAWAN_APP_PORT 2
+#endif
 
 bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
 {
     if (!_lw_confExists || _lw_needsInit) return false;
 
-    if (lmh_join_status_get() != LMH_SET) return false;
+    if (!isJoined()) return false;
 
-    lmh_app_data_t m_lora_app_data = {p, n, LORAWAN_APP_PORT, 0, 0};
+    // No tengo indicación de error para sendUplink()
+    if (n > MAX_UPLINK_PAYLOAD_SIZE) return false;
+    lora.sendUplink((char *)p, n, is_txconfirmed ? 1 : 0, LORAWAN_APP_PORT);
 
-    lmh_error_status main_err = lmh_send(&m_lora_app_data, is_txconfirmed ? LMH_CONFIRMED_MSG : LMH_UNCONFIRMED_MSG);
-
-    if (main_err != LMH_SUCCESS) {
-        uint32_t t = millis();
-        _ts_ultimoTX_FAIL = t;
-        if (_ts_errorAfterJoin == 0) _ts_errorAfterJoin = t;
-
-        if (t - _ts_errorAfterJoin >= 90 * 1000) {
-            ESP_LOGW(__FILE__, "No hay transmisión exitosa luego de timeout, se reintenta join...");
-            _ts_errorAfterJoin = 0;
-            _lw_needsInit = true;
-        } else {
-            /**
-             * NOTA: por Alex Villacís Lasso 2020/11/24
-             * En caso de que falle el envío, probablemente es porque no se ha negociado
-             * todavía una longitud máxima de payload, lo cual depende de la calidad de radio.
-             * El mecanismo de negociación consiste en intentar enviar un paquete LoRaWAN de
-             * longitud cero, lo cual permite negociar un payload mayor según se reciba o no
-             * en el gateway.
-             */
-            m_lora_app_data.port = LORAWAN_APP_PORT;
-            m_lora_app_data.buffsize = 0;
-            lmh_error_status recv_err = lmh_send(&m_lora_app_data, LMH_UNCONFIRMED_MSG);
-        }
-    } else {
-        _ts_errorAfterJoin = 0;
-        _ts_ultimoTX_OK = millis();
-    }
+    _ts_errorAfterJoin = 0;
+    _ts_ultimoTX_OK = millis();
 
     if (_pEvents != NULL && _pEvents->count() > 0) {
         String json_str = _reportActivityJSON();
         _pEvents->send(json_str.c_str());
     }
 
-    return (main_err == LMH_SUCCESS);
+    return true;
 }
 
 yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onJoin(YuboxLoRaWAN_join_cb cbJ)
@@ -590,57 +584,6 @@ void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n)
     if (_pEvents != NULL && _pEvents->count() > 0) {
         String json_str = _reportActivityJSON();
         _pEvents->send(json_str.c_str());
-    }
-}
-
-static void lorawan_confirm_class_handler(DeviceClass_t Class)
-{
-    ESP_LOGI(__FILE__, "switch to class %c done\r\n", "ABC"[Class]);
-
-    // Informs the server that switch has occurred ASAP
-    lmh_app_data_t m_lora_app_data = {NULL, 0, 0, 0, 0};
-    m_lora_app_data.buffsize = 0;
-    m_lora_app_data.port = LORAWAN_APP_PORT;
-    lmh_send(&m_lora_app_data, LMH_UNCONFIRMED_MSG);
-}
-
-static void lorawan_has_joined_handler(void)
-{
-#if (OVER_THE_AIR_ACTIVATION != 0)
-    ESP_LOGI(__FILE__, "Network Joined\r\n");
-#else
-    ESP_LOGI(__FILE__, "OVER_THE_AIR_ACTIVATION != 0\r\n");
-#endif
-  lmh_class_request(CLASS_A);
-  YuboxLoRaWANConf._join_handler();
-}
-
-static void lorawan_join_failed_handler(void)
-{
-    ESP_LOGE(__FILE__, "OVER_THE_AIR_ACTIVATION failed! Retrying...\r\n");
-    YuboxLoRaWANConf._joinfail_handler();
-    lmh_join();
-    YuboxLoRaWANConf._joinstart_handler();
-}
-
-static void lorawan_rx_handler(lmh_app_data_t *app_data)
-{
-    switch (app_data->port) {
-    case 3: // Port 3 switches the class
-        if (app_data->buffsize == 1) {
-            switch (app_data->buffer[0]) {
-            case 0: lmh_class_request(CLASS_A); break;
-            case 1: lmh_class_request(CLASS_B); break;
-            case 2: lmh_class_request(CLASS_C); break;
-            default: break;
-            }
-        }
-        break;
-    case LORAWAN_APP_PORT:
-        YuboxLoRaWANConf._rx_handler(app_data->buffer, app_data->buffsize);
-        break;
-    default:
-        break;
     }
 }
 

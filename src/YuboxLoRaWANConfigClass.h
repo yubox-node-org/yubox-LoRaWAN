@@ -9,7 +9,7 @@
 #include "AsyncJson.h"
 #include "ArduinoJson.h"
 
-#include <LoRaWan-Arduino.h>
+#include <lorawan.h>
 
 #include <functional>
 
@@ -24,9 +24,6 @@ class YuboxLoRaWANConfigClass
 {
 private:
   static const char * _ns_nvram_yuboxframework_lorawan;
-
-  // Región de LoRaWAN a usar para configuración
-  LoRaMacRegion_t _lw_region;
 
   // Sub-banda a usar para conexión inicial a red
   unsigned int _lw_subband;
@@ -46,8 +43,7 @@ private:
   // a cero luego de cada transmisión exitosa.
   uint32_t _ts_errorAfterJoin;
 
-  // La siguiente estructura necesita existir por toda la vida de la sesión LoRaWAN
-  lmh_callback_t _lora_callbacks;
+  int8_t _join_status;
 
   AsyncEventSource * _pEvents;
 
@@ -55,6 +51,7 @@ private:
   uint32_t _ts_ultimoTX_OK;
   uint32_t _ts_ultimoTX_FAIL;
   uint32_t _ts_ultimoRX;
+  uint32_t _ts_ultimoJoin_FAIL;
 
   void _loadSavedCredentialsFromNVRAM(void);
   bool _saveCredentialsToNVRAM(void);
