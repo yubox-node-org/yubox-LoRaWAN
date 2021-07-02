@@ -83,15 +83,25 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
 }
 
 // ESP32 - SX126x pin configuration
-const int PIN_LORA_RESET = 33;  // LORA RESET
-const int PIN_LORA_NSS = 5;  // LORA SPI CS
-const int PIN_LORA_SCLK = 18;  // LORA SPI CLK
-const int PIN_LORA_MISO = 19;  // LORA SPI MISO
-const int PIN_LORA_DIO_1 = 39; // LORA DIO_1
-const int PIN_LORA_BUSY = 34;  // LORA SPI BUSY
-const int PIN_LORA_MOSI = 23;  // LORA SPI MOSI
-const int RADIO_TXEN = 26;   // LORA ANTENNA TX ENABLE
-const int RADIO_RXEN = 27;   // LORA ANTENNA RX ENABLE
+const int PIN_LORA_NSS      = SS;   // LORA SPI CS
+const int PIN_LORA_SCLK     = SCK;  // LORA SPI CLK
+const int PIN_LORA_MISO     = MISO; // LORA SPI MISO
+const int PIN_LORA_MOSI     = MOSI; // LORA SPI MOSI
+#if CONFIG_IDF_TARGET_ESP32
+const int PIN_LORA_RESET    = 33;   // LORA RESET
+const int PIN_LORA_BUSY     = 34;   // LORA SPI BUSY
+const int PIN_LORA_DIO_1    = 39;   // LORA DIO_1
+const int RADIO_TXEN        = 26;   // LORA ANTENNA TX ENABLE
+const int RADIO_RXEN        = 27;   // LORA ANTENNA RX ENABLE
+#elif CONFIG_IDF_TARGET_ESP32S2
+const int PIN_LORA_RESET    = 17;   // LORA RESET
+const int PIN_LORA_BUSY     = 18;   // LORA SPI BUSY
+const int PIN_LORA_DIO_1    =  8;   // LORA DIO_1
+const int RADIO_TXEN        = 16;   // LORA ANTENNA TX ENABLE
+const int RADIO_RXEN        = 15;   // LORA ANTENNA RX ENABLE
+#else
+#error Undefined LORA pins for target!
+#endif
 
 void YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv)
 {
