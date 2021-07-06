@@ -404,7 +404,7 @@ void YuboxLoRaWANConfigClass::update(void)
             ESP_LOGE(__FILE__, "lmh_setSubBandChannels(%d) failed. Wrong sub band requested?\r\n", _lw_subband);
             _joinfail_handler();
         } else {
-            ESP_LOGI(__FILE__, "Starting join LoRaWAN network...\r\n");
+            ESP_LOGI(__FILE__, "Starting join LoRaWAN network (subband %d)...\r\n", _lw_subband);
             lmh_join();
             _joinstart_handler();
         }
