@@ -199,9 +199,6 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
   case LORAMAC_REGION_US915:
     json_doc["region"] = "US 915 MHz";
     break;
-  case LORAMAC_REGION_US915_HYBRID:
-    json_doc["region"] = "US 915 MHz (hybrid)";
-    break;
   case LORAMAC_REGION_AS923:
     json_doc["region"] = "Asia 923 MHz";
     break;
