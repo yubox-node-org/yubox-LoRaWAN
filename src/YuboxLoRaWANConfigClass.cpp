@@ -57,6 +57,7 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     memset(_lw_default_devEUI, 0, sizeof(_lw_default_devEUI));
     _lw_confExists = false;
     _lw_needsInit = true;
+    _lorahw_init = false;
     _join_status = YBX_JOIN_NONE;
     _ts_ultimoJoin_FAIL = 0;
 
@@ -84,14 +85,18 @@ const sRFM_pins RFM_pins = {
   .DIO5 = -1, // NOOP
 };
 
-void YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv)
+bool YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv)
 {
     _loadSavedCredentialsFromNVRAM();
     _setupHTTPRoutes(srv);
 
     if (!lora.init()) {
         log_e("lora_hardware_init failed");
+    } else {
+        _lorahw_init = true;
     }
+
+    return _lorahw_init;
 }
 
 void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
@@ -345,6 +350,8 @@ void YuboxLoRaWANConfigClass::update(void)
 {
     if (!_lw_confExists) return;
 
+    if (!_lorahw_init) return;
+
     if (_lw_needsInit) {
         _lw_needsInit = false;
         _join_status = YBX_JOIN_NONE;
@@ -436,7 +443,7 @@ void YuboxLoRaWANConfigClass::_joinfail_handler(void)
 
 bool YuboxLoRaWANConfigClass::isJoined(void)
 {
-    return (YBX_JOIN_SUCCESS == _join_status);
+    return (_lorahw_init && YBX_JOIN_SUCCESS == _join_status);
 }
 
 #ifndef LORAWAN_APP_PORT
@@ -445,6 +452,7 @@ bool YuboxLoRaWANConfigClass::isJoined(void)
 
 bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
 {
+    if (!_lorahw_init) return false;
     if (!_lw_confExists || _lw_needsInit) return false;
 
     if (!isJoined()) return false;
