@@ -126,7 +126,7 @@ void YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv)
 
     uint32_t err_code = lora_hardware_init(hwConfig);
     if (err_code != 0) {
-        ESP_LOGE(__FILE__, "lora_hardware_init failed - %d\r\n", err_code);
+        log_e("lora_hardware_init failed - %d", err_code);
     }
 }
 
@@ -395,13 +395,13 @@ void YuboxLoRaWANConfigClass::update(void)
 
         uint32_t err_code = lmh_init(&_lora_callbacks, lora_param_init, true, CLASS_A, _lw_region);
         if (err_code != 0) {
-            ESP_LOGE(__FILE__, "lmh_init failed - %d\r\n", err_code);
+            log_e("lmh_init failed - %d", err_code);
             _joinfail_handler();
         } else if (!lmh_setSubBandChannels(_lw_subband)) {
-            ESP_LOGE(__FILE__, "lmh_setSubBandChannels(%d) failed. Wrong sub band requested?\r\n", _lw_subband);
+            log_e("lmh_setSubBandChannels(%d) failed. Wrong sub band requested?", _lw_subband);
             _joinfail_handler();
         } else {
-            ESP_LOGI(__FILE__, "Starting join LoRaWAN network (subband %d)...\r\n", _lw_subband);
+            log_i("Starting join LoRaWAN network (subband %d)...", _lw_subband);
             lmh_join();
             _joinstart_handler();
         }
@@ -448,7 +448,7 @@ bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
         if (_ts_errorAfterJoin == 0) _ts_errorAfterJoin = t;
 
         if (t - _ts_errorAfterJoin >= 90 * 1000) {
-            ESP_LOGW(__FILE__, "No hay transmisión exitosa luego de timeout, se reintenta join...");
+            log_w("No hay transmisión exitosa luego de timeout, se reintenta join...");
             _ts_errorAfterJoin = 0;
             _lw_needsInit = true;
         } else {
@@ -602,7 +602,7 @@ void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n)
 
 static void lorawan_confirm_class_handler(DeviceClass_t Class)
 {
-    ESP_LOGI(__FILE__, "switch to class %c done\r\n", "ABC"[Class]);
+    log_i("switch to class %c done", "ABC"[Class]);
 
     // Informs the server that switch has occurred ASAP
     lmh_app_data_t m_lora_app_data = {NULL, 0, 0, 0, 0};
@@ -614,9 +614,9 @@ static void lorawan_confirm_class_handler(DeviceClass_t Class)
 static void lorawan_has_joined_handler(void)
 {
 #if (OVER_THE_AIR_ACTIVATION != 0)
-    ESP_LOGI(__FILE__, "Network Joined\r\n");
+    log_i("Network Joined");
 #else
-    ESP_LOGI(__FILE__, "OVER_THE_AIR_ACTIVATION != 0\r\n");
+    log_i("OVER_THE_AIR_ACTIVATION != 0");
 #endif
   lmh_class_request(CLASS_A);
   YuboxLoRaWANConf._join_handler();
@@ -624,7 +624,7 @@ static void lorawan_has_joined_handler(void)
 
 static void lorawan_join_failed_handler(void)
 {
-    ESP_LOGE(__FILE__, "OVER_THE_AIR_ACTIVATION failed! Retrying...\r\n");
+    log_w("OVER_THE_AIR_ACTIVATION failed! Retrying...");
     YuboxLoRaWANConf._joinfail_handler();
     lmh_join();
     YuboxLoRaWANConf._joinstart_handler();
