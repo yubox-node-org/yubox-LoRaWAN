@@ -41,6 +41,9 @@ private:
   bool _lw_confExists;
   bool _lw_needsInit;
 
+  // Se establece bandera a VERDADERO luego de inicio exitoso de hardware LoRaWAN
+  bool _lorahw_init;
+
   // Si ocurre un error de TX LUEGO de que se recibe la indicación de
   // JOIN a la red, se asigna este valor. Este valor se vuelve a poner
   // a cero luego de cada transmisión exitosa.
@@ -72,7 +75,7 @@ private:
 
 public:
   YuboxLoRaWANConfigClass(void);
-  void begin(AsyncWebServer & srv);
+  bool begin(AsyncWebServer & srv);
 
   // Función a llamar regularmente para procesar eventos de radio
   void update(void);

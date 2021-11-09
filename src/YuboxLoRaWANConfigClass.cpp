@@ -57,6 +57,7 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     memset(_lw_default_devEUI, 0, sizeof(_lw_default_devEUI));
     _lw_confExists = false;
     _lw_needsInit = true;
+    _lorahw_init = false;
 
     lmh_callback_t lora_callbacks = {
         BoardGetBatteryLevel,
@@ -103,7 +104,7 @@ const int RADIO_RXEN        = 15;   // LORA ANTENNA RX ENABLE
 #error Undefined LORA pins for target!
 #endif
 
-void YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv)
+bool YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv)
 {
     _loadSavedCredentialsFromNVRAM();
     _setupHTTPRoutes(srv);
@@ -127,7 +128,11 @@ void YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv)
     uint32_t err_code = lora_hardware_init(hwConfig);
     if (err_code != 0) {
         log_e("lora_hardware_init failed - %d", err_code);
+    } else {
+        _lorahw_init = true;
     }
+
+    return _lorahw_init;
 }
 
 void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
@@ -375,6 +380,8 @@ void YuboxLoRaWANConfigClass::update(void)
 {
     if (!_lw_confExists) return;
 
+    if (!_lorahw_init) return;
+
     if (_lw_needsInit) {
         _lw_needsInit = false;
 
@@ -429,11 +436,12 @@ void YuboxLoRaWANConfigClass::_joinfail_handler(void)
 
 bool YuboxLoRaWANConfigClass::isJoined(void)
 {
-    return (LMH_SET == lmh_join_status_get());
+    return (_lorahw_init && (LMH_SET == lmh_join_status_get()));
 }
 
 bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
 {
+    if (!_lorahw_init) return false;
     if (!_lw_confExists || _lw_needsInit) return false;
 
     if (lmh_join_status_get() != LMH_SET) return false;
