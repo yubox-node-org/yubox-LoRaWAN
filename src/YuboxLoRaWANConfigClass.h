@@ -17,6 +17,8 @@ typedef void (*YuboxLoRaWAN_join_cb)(void);
 typedef std::function<void (void) > YuboxLoRaWAN_join_func_cb;
 typedef void (*YuboxLoRaWAN_rx_cb)(uint8_t *, uint8_t);
 typedef std::function<void (uint8_t *, uint8_t) > YuboxLoRaWAN_rx_func_cb;
+typedef void (*YuboxLoRaWAN_txdutychange_cb)(void);
+typedef std::function<void (void) > YuboxLoRaWAN_txdutychange_func_cb;
 
 typedef size_t yuboxlorawan_event_id_t;
 
@@ -59,6 +61,12 @@ private:
   uint32_t _ts_ultimoTX_FAIL;
   uint32_t _ts_ultimoRX;
 
+  // Intervalo en segundos de TX DUTY configurado para aplicación. Es responsabilidad
+  // de la aplicación instalar un callback o de otra forma recoger el valor, y
+  // actualizarse para respetar este intervalo de TX DUTY
+  uint32_t _tx_duty_sec;
+  bool _tx_duty_sec_changed;
+
   void _loadSavedCredentialsFromNVRAM(void);
   bool _saveCredentialsToNVRAM(void);
 
@@ -73,6 +81,7 @@ private:
   String _bin2str(uint8_t *, size_t);
   bool _str2bin(const char *, uint8_t *, size_t);
 
+  void _txdutychange_handler(void);
 public:
   YuboxLoRaWANConfigClass(void);
   bool begin(AsyncWebServer & srv);
@@ -94,6 +103,15 @@ public:
   yuboxlorawan_event_id_t onRX(YuboxLoRaWAN_rx_func_cb cbRX);
   void removeRX(YuboxLoRaWAN_rx_cb cbRX);
   void removeRX(yuboxlorawan_event_id_t id);
+
+  // Instalar callback para cambio de duración de TX DUTY requerido
+  yuboxlorawan_event_id_t onTXDuty(YuboxLoRaWAN_txdutychange_cb cb);
+  yuboxlorawan_event_id_t onTXDuty(YuboxLoRaWAN_txdutychange_func_cb cb);
+  void removeTXDuty(YuboxLoRaWAN_txdutychange_cb cb);
+  void removeTXDuty(yuboxlorawan_event_id_t id);
+
+  uint32_t getRequestedTXDutyCycle(void) { return _tx_duty_sec; }
+  bool setRequestedTXDutyCycle(uint32_t);
 
   // Enviar datos una vez confirmado que hay enlace a red
   bool send(uint8_t * p, uint8_t n, bool is_txconfirmed = false);

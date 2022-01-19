@@ -17,9 +17,12 @@
 
 #define JOINREQ_NBTRIALS 3         /**< Number of trials for the join request. */
 
+#define LORAWAN_APP_DEFAULT_TX_DUTYCYCLE 10     /* Default number of seconds for duty cycle */
+
 typedef enum {
   YBX_LW_NETJOIN = 0,
   YBX_LW_RX = 1,
+  YBX_LW_TXDUTY_CHANGE = 2,
 
   YBX_LW_EVENT_MAX = 255
 } yuboxlorawan_event_t;
@@ -33,8 +36,10 @@ typedef struct YuboxLoRaWAN_rx_List
   YuboxLoRaWAN_join_func_cb j_fcb;
   YuboxLoRaWAN_rx_cb rx_cb;
   YuboxLoRaWAN_rx_func_cb rx_fcb;
+  YuboxLoRaWAN_txdutychange_cb txd_cb;
+  YuboxLoRaWAN_txdutychange_func_cb txd_fcb;
 
-  YuboxLoRaWAN_rx_List() : event_type(YBX_LW_EVENT_MAX), id(current_id++), j_cb(NULL), j_fcb(NULL), rx_cb(NULL), rx_fcb(NULL) {}
+  YuboxLoRaWAN_rx_List() : event_type(YBX_LW_EVENT_MAX), id(current_id++), j_cb(NULL), j_fcb(NULL), rx_cb(NULL), rx_fcb(NULL), txd_cb(NULL), txd_fcb(NULL) {}
 } YuboxLoRaWAN_rx_List_t;
 yuboxlorawan_event_id_t YuboxLoRaWAN_rx_List::current_id = 1;
 
@@ -81,6 +86,9 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     _ts_ultimoTX_OK = 0;
     _ts_ultimoTX_FAIL = 0;
     _ts_ultimoRX = 0;
+    _tx_duty_sec = LORAWAN_APP_DEFAULT_TX_DUTYCYCLE;
+    _tx_duty_sec_changed = false;
+
 }
 
 // ESP32 - SX126x pin configuration
@@ -154,6 +162,7 @@ void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
     LWPARAM_LOAD(appEUI)
     LWPARAM_LOAD(appKey)
     _lw_subband = nvram.getUChar("subband", 1);
+    _tx_duty_sec = nvram.getUInt("txduty", LORAWAN_APP_DEFAULT_TX_DUTYCYCLE);
 
     _lw_confExists = ok;
 }
@@ -198,7 +207,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
   YUBOX_RUN_AUTH(request);
   
   AsyncResponseStream *response = request->beginResponseStream("application/json");
-  DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(7));
+  DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(8));
 
   switch (_lw_region) {
   case LORAMAC_REGION_US915:
@@ -239,6 +248,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
     json_doc["appKey"] = s_appKey.c_str();
     json_doc["subband"] = _lw_subband;
     json_doc["netjoined"] = (lmh_join_status_get() == LMH_SET);
+    json_doc["tx_duty_sec"] = getRequestedTXDutyCycle();
 
     serializeJson(json_doc, *response);
     request->send(response);
@@ -257,6 +267,8 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
     uint8_t n_deviceEUI[8];
     uint8_t n_appEUI[8];
     uint8_t n_appKey[16];
+
+    uint32_t n_tx_duty_sec = getRequestedTXDutyCycle();
 
     if (!clientError && !request->hasParam("subband", true)) {
         clientError = true;
@@ -298,6 +310,18 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
     LWPARAM_SCAN(appEUI, false)
     LWPARAM_SCAN(appKey, true)
 
+    if (!clientError && request->hasParam("tx_duty_sec", true)) {
+        p = request->getParam("tx_duty_sec", true);
+
+        if (0 >= sscanf(p->value().c_str(), "%lu", &n_tx_duty_sec)) {
+            clientError = true;
+            responseMsg = "Intervalo de transmisión no es numérico";
+        } else if (n_tx_duty_sec < 10) {
+            clientError = true;
+            responseMsg = "Intervalo de transmisión debe ser de al menos 10 segundos";
+        }
+    }
+
     if (!clientError) {
         memcpy(_lw_devEUI, n_deviceEUI, sizeof(_lw_devEUI));
         memcpy(_lw_appEUI, n_appEUI, sizeof(_lw_appEUI));
@@ -307,6 +331,9 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
         serverError = !_saveCredentialsToNVRAM();
         if (serverError) {
             responseMsg = "No se pueden guardar valores LoRaWAN";
+        } else if (!setRequestedTXDutyCycle(n_tx_duty_sec)) {
+            serverError = true;
+            responseMsg = "No se puede guardar intervalo de transmisión deseado";
         } else {
             _lw_confExists = true;
             _lw_needsInit = true;
@@ -376,9 +403,29 @@ bool YuboxLoRaWANConfigClass::_saveCredentialsToNVRAM(void)
     return ok;
 }
 
+bool YuboxLoRaWANConfigClass::setRequestedTXDutyCycle(uint32_t n_txduty)
+{
+    if (n_txduty <= 0) return false;
+    if (n_txduty != _tx_duty_sec) {
+        Preferences nvram;
+        nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+
+        if (!nvram.putUInt("txduty", n_txduty)) return false;
+
+        _tx_duty_sec = n_txduty;
+        _tx_duty_sec_changed = true;
+    }
+    return true;
+}
+
 void YuboxLoRaWANConfigClass::update(void)
 {
     if (!_lw_confExists) return;
+
+    if (_tx_duty_sec_changed) {
+        _tx_duty_sec_changed = false;
+        _txdutychange_handler();
+    }
 
     if (!_lorahw_init) return;
 
@@ -569,6 +616,48 @@ void YuboxLoRaWANConfigClass::removeRX(yuboxlorawan_event_id_t id)
   }
 }
 
+yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onTXDuty(YuboxLoRaWAN_txdutychange_cb cb)
+{
+  if (!cb) return 0;
+
+  YuboxLoRaWAN_rx_List_t n_evHandler;
+  n_evHandler.event_type = YBX_LW_TXDUTY_CHANGE;
+  n_evHandler.txd_cb = cb;
+  n_evHandler.txd_fcb = NULL;
+  cbRXList.push_back(n_evHandler);
+  return n_evHandler.id;
+}
+
+yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onTXDuty(YuboxLoRaWAN_txdutychange_func_cb cb)
+{
+  if (!cb) return 0;
+
+  YuboxLoRaWAN_rx_List_t n_evHandler;
+  n_evHandler.event_type = YBX_LW_TXDUTY_CHANGE;
+  n_evHandler.txd_cb = NULL;
+  n_evHandler.txd_fcb = cb;
+  cbRXList.push_back(n_evHandler);
+  return n_evHandler.id;
+}
+
+void YuboxLoRaWANConfigClass::removeTXDuty(YuboxLoRaWAN_txdutychange_cb cb)
+{
+  if (!cb) return;
+
+  for (auto i = 0; i < cbRXList.size(); i++) {
+    YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
+    if (entry.event_type == YBX_LW_TXDUTY_CHANGE && entry.txd_cb == cb) cbRXList.erase(cbRXList.begin() + i);
+  }
+}
+
+void YuboxLoRaWANConfigClass::removeTXDuty(yuboxlorawan_event_id_t id)
+{
+  for (auto i = 0; i < cbRXList.size(); i++) {
+    YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
+    if (entry.event_type == YBX_LW_TXDUTY_CHANGE && entry.id == id) cbRXList.erase(cbRXList.begin() + i);
+  }
+}
+
 void YuboxLoRaWANConfigClass::_join_handler(void)
 {
     if (_pEvents != NULL && _pEvents->count() > 0) {
@@ -605,6 +694,20 @@ void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n)
     if (_pEvents != NULL && _pEvents->count() > 0) {
         String json_str = _reportActivityJSON();
         _pEvents->send(json_str.c_str());
+    }
+}
+
+void YuboxLoRaWANConfigClass::_txdutychange_handler(void)
+{
+    for (auto i = 0; i < cbRXList.size(); i++) {
+        YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
+        if (entry.event_type == YBX_LW_TXDUTY_CHANGE && (entry.txd_cb || entry.txd_fcb)) {
+            if (entry.txd_cb) {
+                entry.txd_cb();
+            } else if (entry.txd_fcb) {
+                entry.txd_fcb();
+            }
+        }
     }
 }
 
