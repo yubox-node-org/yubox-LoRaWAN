@@ -78,6 +78,8 @@ function setupLoRaWANTab()
             lorawanpane.find('input#deviceEUI').val(lorawan_formatEUI((data.deviceEUI == undefined) ? data.deviceEUI_ESP32 : data.deviceEUI));
             lorawanpane.find('input#appEUI').val((data.appEUI == undefined) ? '' : lorawan_formatEUI(data.appEUI));
             lorawanpane.find('input#appKey').val((data.appKey == undefined) ? '' : lorawan_formatEUI(data.appKey));
+
+            lorawanpane.find('input#tx_duty_sec').val(data.tx_duty_sec);
         })
         .fail(function (e) { yuboxStdAjaxFailHandler(e); });
 
@@ -135,7 +137,8 @@ function setupLoRaWANTab()
             subband:    lorawanpane.find('input#subband').val(),
             deviceEUI:  lorawan_unformatEUI(lorawanpane.find('input#deviceEUI').val()),
             //appEUI:     lorawan_unformatEUI(lorawanpane.find('input#appEUI').val()),
-            appKey:     lorawan_unformatEUI(lorawanpane.find('input#appKey').val())
+            appKey:     lorawan_unformatEUI(lorawanpane.find('input#appKey').val()),
+            tx_duty_sec: lorawanpane.find('input#tx_duty_sec').val()
         };
         var appeui = lorawan_unformatEUI(lorawanpane.find('input#appEUI').val());
         if (appeui != '') postData.appEUI = appeui;
