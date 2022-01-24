@@ -43,9 +43,9 @@ void setup()
   YuboxLoRaWANConf.onRX(lorawan_rx);
   requestedWiFiState = YuboxWiFi.haveControlOfWiFi();
   if (requestedWiFiState) {
-    Serial.println("INFO: YUBOX Framework en control inicial de WiFi (PRENDIDO)");
+    log_i("YUBOX Framework en control inicial de WiFi (PRENDIDO)");
   } else {
-    Serial.println("INFO: WiFi inicialmente APAGADO");
+    log_i("WiFi inicialmente APAGADO");
   }
 #if CONFIG_IDF_TARGET_ESP32
   attachInterrupt(digitalPinToInterrupt(PIN_WIFI_BTN), _cb_btn, RISING);
@@ -75,11 +75,11 @@ void loop()
     requestedWiFiState = YuboxWiFi.haveControlOfWiFi();
   } else if (requestedWiFiState != YuboxWiFi.haveControlOfWiFi()) {
     if (requestedWiFiState) {
-      Serial.println("INFO: YUBOX Framework toma control de WiFi...");
+      log_i("YUBOX Framework toma control de WiFi...");
       YuboxWiFi.takeControlOfWiFi();
       YuboxWiFi.saveControlOfWiFi();
     } else {
-      Serial.println("INFO: YUBOX Framework cede control de WiFi y lo apaga...");
+      log_i("YUBOX Framework cede control de WiFi y lo apaga...");
       YuboxWiFi.releaseControlOfWiFi(true);
       YuboxWiFi.saveControlOfWiFi();
     }
@@ -117,7 +117,7 @@ void _cb_btn(void)
 
 void lorawan_joined(void)
 {
-  Serial.println("DEBUG: dispositivo unido a red LoRaWAN!");
+  log_i("dispositivo unido a red LoRaWAN!");
 }
 
 void lorawan_rx(uint8_t *p, uint8_t n)
@@ -167,7 +167,7 @@ void lorawan_payload(AsyncWebServerRequest * request)
 void send_lora_frame(void)
 {
     if (!YuboxLoRaWANConf.isJoined()) {
-      //Serial.println("WARN: todavía no se une a una red LoRaWAN...");
+      log_w("todavía no se une a una red LoRaWAN...");
     } else {
       const char * test_payload = "Hola mundo";
       uint8_t * payload = (uint8_t *)test_payload;
@@ -177,9 +177,9 @@ void send_lora_frame(void)
         payloadlen = str_payload.length();
       }
 
-      Serial.printf("INFO: enviando payload (%d bytes)... ", payloadlen);
+      log_i("INFO: enviando payload (%d bytes)... ", payloadlen);
       bool ok = YuboxLoRaWANConf.send(/*buffer*/payload, payloadlen);
       str_payload = "";
-      Serial.println(ok ? "OK" : "ERR");
+      if (ok) log_i("OK") ; else log_e("ERR");
     }
 }
