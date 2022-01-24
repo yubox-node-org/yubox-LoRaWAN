@@ -1,157 +1,129 @@
 function setupLoRaWANTab()
 {
-    var lorawanpane = getYuboxPane('lorawan');
-    var data = {
+    const pane = getYuboxPane('lorawan', true);
+    pane.data = {
         'sse': null
     };
-    lorawanpane.data(data);
 
-    lorawanpane.find('input#deviceEUI, input#appEUI, input#appKey').blur(function() {
-        var txt = $(this);
-        txt.val(lorawan_formatEUI(txt.val()));
+    pane.querySelectorAll('input#deviceEUI, input#appEUI, input#appKey')
+    .forEach(el => el.addEventListener('blur', function (ev) {
+        this.value = lorawan_formatEUI(this.value);
+    }));
+
+    pane.querySelector('button#deveui_random').addEventListener('click', function () {
+        pane.querySelector('input#deviceEUI').value = lorawan_formatEUI(lorawan_genEUI(8));
     });
-
-    lorawanpane.find('button#deveui_random').click(function () {
-        var lorawanpane = getYuboxPane('lorawan');
-
-        lorawanpane.find('input#deviceEUI').val(lorawan_formatEUI(lorawan_genEUI(8)));
+    pane.querySelector('button#deveui_fetch_mac').addEventListener('click', function () {
+        pane.querySelector('input#deviceEUI').value = pane.querySelector('input#deviceEUI_ESP32').value;
     });
-    lorawanpane.find('button#deveui_fetch_mac').click(function () {
-        var lorawanpane = getYuboxPane('lorawan');
-
-        lorawanpane.find('input#deviceEUI').val(lorawanpane.find('input#deviceEUI_ESP32').val());
+    pane.querySelector('button#appkey_random').addEventListener('click', function () {
+        pane.querySelector('input#appKey').value = lorawan_formatEUI(lorawan_genEUI(16));
     });
-    lorawanpane.find('button#appkey_random').click(function () {
-        var lorawanpane = getYuboxPane('lorawan');
+    pane.querySelector('button#appkey_toggle').addEventListener('click', function () {
+        const txt_appKey = pane.querySelector('input#appKey');
+        const btn_toggle = pane.querySelector('button#appkey_toggle');
+        const btn_appkeyrandom = pane.querySelector('button#appkey_random');
+        const svg_eye_show = btn_toggle.querySelector('svg.eye-show');
+        const svg_eye_hide = btn_toggle.querySelector('svg.eye-hide')
 
-        lorawanpane.find('input#appKey').val(lorawan_formatEUI(lorawan_genEUI(16)));
-    });
-    lorawanpane.find('button#appkey_toggle').click(function () {
-        var lorawanpane = getYuboxPane('lorawan');
-        var txt_appKey = lorawanpane.find('input#appKey');
-        var btn_toggle = lorawanpane.find('button#appkey_toggle');
-        var btn_appkeyrandom = lorawanpane.find('button#appkey_random');
-
-        if (txt_appKey.attr('type') == 'password') {
+        if (txt_appKey.type == 'password') {
             // Se debe mostrar clave
-            btn_toggle.find('svg.eye-show').hide();
-            btn_toggle.find('svg.eye-hide').show();
-            txt_appKey.attr('type', 'text');
-            btn_appkeyrandom.show();
+            svg_eye_show.style.display = 'none';
+            svg_eye_hide.style.display = '';
+            txt_appKey.type = 'text';
+            btn_appkeyrandom.style.display = '';
         } else {
             // Se debe ocultar clave
-            btn_toggle.find('svg.eye-hide').hide();
-            btn_toggle.find('svg.eye-show').show();
-            txt_appKey.attr('type', 'password');
-            btn_appkeyrandom.hide();
+            svg_eye_hide.style.display = 'none';
+            svg_eye_show.style.display = '';
+            txt_appKey.type = 'password';
+            btn_appkeyrandom.style.display = 'none';
         }
     });
 
     // https://getbootstrap.com/docs/4.4/components/navs/#events
     getYuboxNavTab('lorawan')
     .on('shown.bs.tab', function (e) {
-        lorawanpane.find('form span#lorawan_connstatus')
-            .removeClass('badge-success badge-danger')
-            .addClass('badge-secondary')
-            .text('(consultando)');
+        const span_connstatus = pane.querySelector('form span#lorawan_connstatus');
+        span_connstatus.classList.remove('badge-success', 'badge-danger');
+        span_connstatus.classList.add('badge-secondary');
+        span_connstatus.textContent = '(consultando)';
 
-        $.get(yuboxAPI('lorawan')+'/config.json')
-        .done(function (data) {
-            var lorawanpane = getYuboxPane('lorawan');
-            var span_connstatus = lorawanpane.find('form span#lorawan_connstatus');
-
-            span_connstatus.removeClass('badge-danger badge-warning badge-success badge-secondary');
+        yuboxFetch('lorawan', 'config.json')
+        .then((data) => {
+            span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
             if (data.netjoined) {
-                span_connstatus
-                    .addClass('badge-success')
-                    .text('CONECTADO');
+                span_connstatus.classList.add('badge-success');
+                span_connstatus.textContent = 'CONECTADO';
             } else {
-                span_connstatus
-                    .addClass('badge-danger')
-                    .text('NO CONECTADO');
+                span_connstatus.classList.add('badge-danger');
+                span_connstatus.textContent = 'NO CONECTADO';
             }
 
-            lorawanpane.find('input#region').val(data.region);
-            lorawanpane.find('input#subband').val(data.subband);
-            // data.netjoined
-            lorawanpane.find('input#deviceEUI_ESP32').val(lorawan_formatEUI(data.deviceEUI_ESP32));
-            lorawanpane.find('input#deviceEUI').val(lorawan_formatEUI((data.deviceEUI == undefined) ? data.deviceEUI_ESP32 : data.deviceEUI));
-            lorawanpane.find('input#appEUI').val((data.appEUI == undefined) ? '' : lorawan_formatEUI(data.appEUI));
-            lorawanpane.find('input#appKey').val((data.appKey == undefined) ? '' : lorawan_formatEUI(data.appKey));
-
-            lorawanpane.find('input#tx_duty_sec').val(data.tx_duty_sec);
-        })
-        .fail(function (e) { yuboxStdAjaxFailHandler(e); });
+            [
+                ['input#region',            data.region],
+                ['input#subband',           data.subband],
+                ['input#deviceEUI_ESP32',   lorawan_formatEUI(data.deviceEUI_ESP32)],
+                ['input#deviceEUI',         lorawan_formatEUI((data.deviceEUI == undefined) ? data.deviceEUI_ESP32 : data.deviceEUI)],
+                ['input#appEUI',            (data.appEUI == undefined) ? '' : lorawan_formatEUI(data.appEUI)],
+                ['input#appKey',            (data.appKey == undefined) ? '' : lorawan_formatEUI(data.appKey)],
+                ['input#tx_duty_sec',       data.tx_duty_sec]
+            ].forEach(t => pane.querySelector(t[0]).value = t[1]);
+        }, (e) => { yuboxStdAjaxFailHandler(e); });
 
         if (!!window.EventSource) {
-            var sse = new EventSource(yuboxAPI('lorawan')+'/status');
-            sse.onmessage = function(e) {
-                var data = $.parseJSON(e.data);
+            let sse = new EventSource(yuboxAPI('lorawan')+'/status');
+            sse.addEventListener('message', function (e) {
+                let data = JSON.parse(e.data);
 
-                var lorawanpane = getYuboxPane('lorawan');
-                var span_connstatus = lorawanpane.find('form span#lorawan_connstatus');
-
-                span_connstatus.removeClass('badge-danger badge-warning badge-success badge-secondary');
-                if (data.join == 'RESET') {
-                    span_connstatus
-                        .addClass('badge-secondary')
-                        .text('NO CONECTADO');
-                } else if (data.join == 'FAILEd') {
-                    span_connstatus
-                        .addClass('badge-danger')
-                        .text('FALLO CONEXIÓN');
-                } else if (data.join == 'ONGOING') {
-                    span_connstatus
-                        .addClass('badge-warning')
-                        .text('CONECTANDO...');
-                } else if (data.join == 'SET') {
-                    span_connstatus
-                        .addClass('badge-success')
-                        .text('CONECTADO');
+                span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
+                const nstatus = {
+                    'RESET':    ['badge-secondary', 'NO CONECTADO'],
+                    'FAILED':   ['badge-danger',    'FALLO CONEXIÓN'],
+                    'ONGOING':  ['badge-warning',   'CONECTANDO...'],
+                    'SET':      ['badge-success',   'CONECTADO']
+                };
+                if (data.join in nstatus) {
+                    span_connstatus.classList.add(nstatus[data.join][0]);
+                    span_connstatus.textContent = nstatus[data.join][1]
                 }
 
-                lorawanpane.find('div.lorawan-stats#rx').text(lorawan_format_tsactivity(data.rx, data.ts));
-                lorawanpane.find('div.lorawan-stats#tx_ok').text(lorawan_format_tsactivity(data.tx_ok, data.ts));
-                lorawanpane.find('div.lorawan-stats#tx_fail').text(lorawan_format_tsactivity(data.tx_fail, data.ts));
-            }
+                [ 'rx', 'tx_ok', 'tx_fail' ]
+                .forEach(k => pane.querySelector('div.lorawan-stats#'+k).textContent = lorawan_format_tsactivity(data[k], data.ts));
+            });
             sse.addEventListener('error', function (e) {
                 yuboxMostrarAlertText('danger', 'Se ha perdido conexión con dispositivo para monitoreo LoRaWAN');
             });
-            lorawanpane.data('sse', sse);
+            pane.data['sse'] = sse;
         } else {
             yuboxMostrarAlertText('danger', 'Este navegador no soporta Server-Sent Events, no se puede monitorear LoRaWAN.');
         }
     })
     .on('hide.bs.tab', function (e) {
-        var lorawanpane = getYuboxPane('lorawan');
-        if (lorawanpane.data('sse') != null) {
-            lorawanpane.data('sse').close();
-            lorawanpane.data('sse', null);
+        if (pane.data['sse'] != null) {
+            pane.data['sse'].close();
+            pane.data['sse'] = null;
         }
     });
 
-    lorawanpane.find('button[name=apply]').click(function () {
-        var lorawanpane = getYuboxPane('lorawan');
-
-        var postData = {
-            subband:    lorawanpane.find('input#subband').val(),
-            deviceEUI:  lorawan_unformatEUI(lorawanpane.find('input#deviceEUI').val()),
-            //appEUI:     lorawan_unformatEUI(lorawanpane.find('input#appEUI').val()),
-            appKey:     lorawan_unformatEUI(lorawanpane.find('input#appKey').val()),
-            tx_duty_sec: lorawanpane.find('input#tx_duty_sec').val()
+    pane.querySelector('button[name=apply]').addEventListener('click', function () {
+        let postData = {
+            subband:    pane.querySelector('input#subband').value,
+            deviceEUI:  lorawan_unformatEUI(pane.querySelector('input#deviceEUI').value),
+            appKey:     lorawan_unformatEUI(pane.querySelector('input#appKey').value),
+            tx_duty_sec: pane.querySelector('input#tx_duty_sec').value
         };
-        var appeui = lorawan_unformatEUI(lorawanpane.find('input#appEUI').val());
+        let appeui = lorawan_unformatEUI(pane.querySelector('input#appEUI').value);
         if (appeui != '') postData.appEUI = appeui;
-        $.post(yuboxAPI('lorawan')+'/config.json', postData)
-        .done(function (r) {
+        yuboxFetch('lorawan', 'config.json', postData)
+        .then((r) => {
             if (r.success) {
                 // Recargar los datos recién guardados del dispositivo
                 yuboxMostrarAlertText('success', r.msg, 3000);
             } else {
                 yuboxMostrarAlertText('danger', r.msg);
             }
-        })
-        .fail(function (e) { yuboxStdAjaxFailHandler(e); });
+        }, e => yuboxStdAjaxFailHandler(e));
     });
 }
 
