@@ -109,7 +109,7 @@ void WiFiEvent_ledStatus(WiFiEvent_t event)
 unsigned long lastbtn = 0;
 void _cb_btn(void)
 {
-  if (lastbtn == 0 || t - lastbtn >= 4000) {
+  if (millis() >= 5000 && (lastbtn == 0 || t - lastbtn >= 4000)) {
     lastbtn = t;
     requestedWiFiState = !requestedWiFiState;
   }
