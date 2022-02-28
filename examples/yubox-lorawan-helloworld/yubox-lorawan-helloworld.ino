@@ -12,15 +12,19 @@ void lorawan_payload(AsyncWebServerRequest * request);
 
 // Pines para estado y control de wifi
 const uint8_t PIN_WIFI_LED = GPIO_NUM_4;
+#if CONFIG_IDF_TARGET_ESP32
 const uint8_t PIN_WIFI_BTN = GPIO_NUM_36;
+#endif
 
 bool requestedWiFiState = false;
 void setup()
 {
   pinMode(digitalPinToInterrupt(PIN_WIFI_LED), OUTPUT);
-  pinMode(digitalPinToInterrupt(PIN_WIFI_BTN), INPUT_PULLUP);
   digitalWrite(PIN_WIFI_LED, LOW);
+#if CONFIG_IDF_TARGET_ESP32
+  pinMode(digitalPinToInterrupt(PIN_WIFI_BTN), INPUT_PULLUP);
   digitalWrite(PIN_WIFI_BTN, HIGH);
+#endif
 
   WiFi.onEvent(WiFiEvent_ledStatus);
 
@@ -43,7 +47,9 @@ void setup()
   } else {
     Serial.println("INFO: WiFi inicialmente APAGADO");
   }
+#if CONFIG_IDF_TARGET_ESP32
   attachInterrupt(digitalPinToInterrupt(PIN_WIFI_BTN), _cb_btn, RISING);
+#endif
 }
 
 #define LORAWAN_APP_TX_DUTYCYCLE 10000 /**< Defines the application data transmission duty cycle. 10s, value in [ms]. */
