@@ -41,9 +41,9 @@ function setupLoRaWANTab()
         }
     });
 
-    // https://getbootstrap.com/docs/4.4/components/navs/#events
-    getYuboxNavTab('lorawan')
-    .on('shown.bs.tab', function (e) {
+    // https://getbootstrap.com/docs/5.1/components/navs-tabs/#events
+    const navtab = getYuboxNavTab('lorawan', true);
+    navtab.addEventListener('shown.bs.tab', function (e) {
         const span_connstatus = pane.querySelector('form span#lorawan_connstatus');
         span_connstatus.classList.remove('badge-success', 'badge-danger');
         span_connstatus.classList.add('badge-secondary');
@@ -98,8 +98,8 @@ function setupLoRaWANTab()
         } else {
             yuboxMostrarAlertText('danger', 'Este navegador no soporta Server-Sent Events, no se puede monitorear LoRaWAN.');
         }
-    })
-    .on('hide.bs.tab', function (e) {
+    });
+    navtab.addEventListener('hide.bs.tab', function (e) {
         if (pane.data['sse'] != null) {
             pane.data['sse'].close();
             pane.data['sse'] = null;
