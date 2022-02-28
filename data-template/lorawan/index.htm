@@ -55,7 +55,7 @@
                         </button>
                     </div>
                 </div>
-                <small id="deviceEUI_help" class="form-text text-muted">El EUI de dispositivo es una secuencia de 8
+                <small id="deviceEUI_help" class="form-text d-block text-muted">El EUI de dispositivo es una secuencia de 8
                     bytes que identifica de forma única al este dispositivo en la red LoRaWAN.</small>
                 <input type="hidden" name="deviceEUI_ESP32" id="deviceEUI_ESP32" value="DE AD BE EF DE AD BE EF" />
             </div>
@@ -64,7 +64,7 @@
                 <label class="form-label" for="appEUI">EUI de aplicación (8 octetos HEX):</label>
                 <input type="text" id="appEUI" name="appEUI" class="form-control" pattern="([0-9A-Fa-f]{2}\s*){8}"
                     placeholder="00 00 00 00 00 00 00 00" aria-describedby="appEUI_help" value="" />
-                <small id="appEUI_help" class="form-text text-muted">El EUI de aplicación identifica la aplicación
+                <small id="appEUI_help" class="form-text d-block text-muted">El EUI de aplicación identifica la aplicación
                     en el servidor LoRaWAN. Una aplicación LoRaWAN agrupa dispositivos dedicados a un propósito
                     común. Algunos servidores de aplicación LoRaWAN (ChirpStack) ignoran este valor. Si no se lo
                     asigna, se enviará un EUI lleno de ceros.</small>
@@ -105,7 +105,7 @@
                         </button>
                     </div>
                 </div>
-                <small id="appKey_help" class="form-text text-muted">La clave de aplicación autoriza a este dispositivo a
+                <small id="appKey_help" class="form-text d-block text-muted">La clave de aplicación autoriza a este dispositivo a
                     unirse a la red LoRaWAN. Esta clave puede estar asociada en el servidor de aplicaciones a la aplicación
                     o directamente al dispositivo. Asegúrese de hacer coincidir esta clave con el registro en el servidor
                     de aplicaciones LoRaWAN.</small>
@@ -115,7 +115,7 @@
                 <label class="form-label" for="tx_duty_sec">Intervalo de transmisión de payload (TX DUTY):</label>
                 <input type="number" id="tx_duty_sec" name="tx_duty_sec" class="form-control" min="10" list="tx_duty_sec_common"
                     placeholder="10" aria-describedby="tx_duty_sec_help" value="" />
-                <small id="tx_duty_sec_help" class="form-text text-muted">Intervalo de transmisión deseada de datos
+                <small id="tx_duty_sec_help" class="form-text d-block text-muted">Intervalo de transmisión deseada de datos
                     de aplicación, en segundos. Un valor más grande permite acomodar a más dispositivos dentro
                     de una misma área.</small>
                 <datalist id="tx_duty_sec_common">
