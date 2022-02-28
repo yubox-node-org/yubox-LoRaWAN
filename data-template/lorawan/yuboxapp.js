@@ -45,18 +45,18 @@ function setupLoRaWANTab()
     const navtab = getYuboxNavTab('lorawan', true);
     navtab.addEventListener('shown.bs.tab', function (e) {
         const span_connstatus = pane.querySelector('form span#lorawan_connstatus');
-        span_connstatus.classList.remove('badge-success', 'badge-danger');
-        span_connstatus.classList.add('badge-secondary');
+        span_connstatus.classList.remove('bg-success', 'bg-danger');
+        span_connstatus.classList.add('bg-secondary');
         span_connstatus.textContent = '(consultando)';
 
         yuboxFetch('lorawan', 'config.json')
         .then((data) => {
-            span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
+            span_connstatus.classList.remove('bg-danger', 'bg-warning', 'bg-success', 'bg-secondary');
             if (data.netjoined) {
-                span_connstatus.classList.add('badge-success');
+                span_connstatus.classList.add('bg-success');
                 span_connstatus.textContent = 'CONECTADO';
             } else {
-                span_connstatus.classList.add('badge-danger');
+                span_connstatus.classList.add('bg-danger');
                 span_connstatus.textContent = 'NO CONECTADO';
             }
 
@@ -76,12 +76,12 @@ function setupLoRaWANTab()
             sse.addEventListener('message', function (e) {
                 let data = JSON.parse(e.data);
 
-                span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
+                span_connstatus.classList.remove('bg-danger', 'bg-warning', 'bg-success', 'bg-secondary');
                 const nstatus = {
-                    'RESET':    ['badge-secondary', 'NO CONECTADO'],
-                    'FAILED':   ['badge-danger',    'FALLO CONEXIÓN'],
-                    'ONGOING':  ['badge-warning',   'CONECTANDO...'],
-                    'SET':      ['badge-success',   'CONECTADO']
+                    'RESET':    ['bg-secondary', 'NO CONECTADO'],
+                    'FAILED':   ['bg-danger',    'FALLO CONEXIÓN'],
+                    'ONGOING':  ['bg-warning',   'CONECTANDO...'],
+                    'SET':      ['bg-success',   'CONECTADO']
                 };
                 if (data.join in nstatus) {
                     span_connstatus.classList.add(nstatus[data.join][0]);
