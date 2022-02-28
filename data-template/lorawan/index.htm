@@ -2,7 +2,7 @@
     <div class="card-header">Configuración de conexión LoRaWAN</div>
     <div class="card-body">
         <form>
-            <div class="form-group row">
+            <div class="mb-4 row">
                 <label for="region" class="col-sm-2 col-form-label">Región de LoRaWAN:</label>
                 <div class="col-sm-4">
                     <input type="text" name="region" id="region" readonly class="form-control-plaintext" />
@@ -13,7 +13,7 @@
                 </div>
             </div>
 
-            <div class="form-group row">
+            <div class="mb-4 row">
                 <legend class="col-form-label col">Red LoRaWAN:</legend>
                 <div class="col-form-label col-sm-2">
                     <h5>
@@ -28,7 +28,7 @@
                 <div class="col-form-label col-sm-2 lorawan-stats" id="rx">?</div>
             </div>
 
-            <div class="form-group">
+            <div class="mb-4">
                 <label class="form-label" for="deviceEUI">EUI de dispositivo (8 octetos HEX):</label>
                 <div class="input-group">
                     <input type="text" id="deviceEUI" name="deviceEUI" class="form-control" pattern="([0-9A-Fa-f]{2}\s*){8}"
@@ -60,7 +60,7 @@
                 <input type="hidden" name="deviceEUI_ESP32" id="deviceEUI_ESP32" value="DE AD BE EF DE AD BE EF" />
             </div>
 
-            <div class="form-group">
+            <div class="mb-4">
                 <label class="form-label" for="appEUI">EUI de aplicación (8 octetos HEX):</label>
                 <input type="text" id="appEUI" name="appEUI" class="form-control" pattern="([0-9A-Fa-f]{2}\s*){8}"
                     placeholder="00 00 00 00 00 00 00 00" aria-describedby="appEUI_help" value="" />
@@ -70,7 +70,7 @@
                     asigna, se enviará un EUI lleno de ceros.</small>
             </div>
 
-            <div class="form-group">
+            <div class="mb-4">
                 <label class="form-label" for="appKey">Clave de aplicación (16 octetos HEX):</label>
                 <div class="input-group">
                     <input type="password" id="appKey" name="appKey" class="form-control" pattern="([0-9A-Fa-f]{2}\s*){16}"
@@ -111,7 +111,7 @@
                     de aplicaciones LoRaWAN.</small>
             </div>
 
-            <div class="form-group">
+            <div class="mb-4">
                 <label class="form-label" for="tx_duty_sec">Intervalo de transmisión de payload (TX DUTY):</label>
                 <input type="number" id="tx_duty_sec" name="tx_duty_sec" class="form-control" min="10" list="tx_duty_sec_common"
                     placeholder="10" aria-describedby="tx_duty_sec_help" value="" />
