@@ -90,7 +90,7 @@ void YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv)
     _setupHTTPRoutes(srv);
 
     if (!lora.init()) {
-        ESP_LOGE(__FILE__, "lora_hardware_init failed\r\n");
+        log_e("lora_hardware_init failed");
     }
 }
 
@@ -351,7 +351,7 @@ void YuboxLoRaWANConfigClass::update(void)
 
         _ts_ultimoJoin_FAIL = 0;
         if (!lora.init()) {
-            ESP_LOGE(__FILE__, "lora.init failed\r\n");
+            log_e("lora.init failed");
             _join_status = YBX_JOIN_FAIL;
             _joinfail_handler();
             return;
@@ -374,7 +374,7 @@ void YuboxLoRaWANConfigClass::update(void)
         lora.setAppEUI(_bin2str(_lw_appEUI, sizeof(_lw_appEUI)).c_str());
         lora.setAppKey(_bin2str(_lw_appKey, sizeof(_lw_appKey)).c_str());
 
-        ESP_LOGI(__FILE__, "Starting join LoRaWAN network...\r\n");
+        log_i("Starting join LoRaWAN network...");
         _join_status = YBX_JOIN_ONGOING;
         _joinstart_handler();
 
@@ -400,7 +400,7 @@ void YuboxLoRaWANConfigClass::update(void)
             }
         } else {
             if (_join_status == YBX_JOIN_FAIL && _ts_ultimoJoin_FAIL != 0 && millis() - _ts_ultimoJoin_FAIL >= 10000) {
-                ESP_LOGI(__FILE__, "Starting join LoRaWAN network...\r\n");
+                log_i("Starting join LoRaWAN network...");
                 _join_status = YBX_JOIN_ONGOING;
                 _joinstart_handler();
 
