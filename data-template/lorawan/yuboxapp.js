@@ -43,7 +43,7 @@ function setupLoRaWANTab()
 
     // https://getbootstrap.com/docs/5.1/components/navs-tabs/#events
     const navtab = getYuboxNavTab('lorawan', true);
-    navtab.addEventListener('shown.bs.tab', function (e) {
+    navtab.addEventListener(yuboxBSEvt('shown.bs.tab'), function (e) {
         const span_connstatus = pane.querySelector('form span#lorawan_connstatus');
         span_connstatus.classList.remove('bg-success', 'bg-danger');
         span_connstatus.classList.add('bg-secondary');
@@ -99,7 +99,7 @@ function setupLoRaWANTab()
             yuboxMostrarAlertText('danger', 'Este navegador no soporta Server-Sent Events, no se puede monitorear LoRaWAN.');
         }
     });
-    navtab.addEventListener('hide.bs.tab', function (e) {
+    navtab.addEventListener(yuboxBSEvt('hide.bs.tab'), function (e) {
         if (pane.data['sse'] != null) {
             pane.data['sse'].close();
             pane.data['sse'] = null;
