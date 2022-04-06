@@ -14,6 +14,10 @@ void lorawan_payload(AsyncWebServerRequest * request);
 //             control directo de LED vía GPIO_NUM_4
 //#define YUBOX_LED       GPIO_NUM_4
 
+// 2022-04-06: En la tarjeta YUBOX One versión 3 en adelante, se requiere
+//             activar el step-up de 5 voltios para que LoRaWAN funcione.
+#define YUBOX_ENABLE_5V   GPIO_NUM_4
+
 #if CONFIG_IDF_TARGET_ESP32
 const uint8_t PIN_WIFI_BTN = GPIO_NUM_36;
 #endif
@@ -28,6 +32,11 @@ void setup()
 #if CONFIG_IDF_TARGET_ESP32
   pinMode(digitalPinToInterrupt(PIN_WIFI_BTN), INPUT_PULLUP);
   digitalWrite(PIN_WIFI_BTN, HIGH);
+#endif
+#ifdef YUBOX_ENABLE_5V
+  // Se requiere activar 5V explícitamente para LoRaWAN y RS485
+  pinMode(YUBOX_ENABLE_5V, OUTPUT);
+  digitalWrite(YUBOX_ENABLE_5V, HIGH);
 #endif
 
   WiFi.onEvent(WiFiEvent_ledStatus);
