@@ -493,6 +493,7 @@ bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
 
     if (lmh_join_status_get() != LMH_SET) return false;
 
+    if (p == NULL) n = 0;
     lmh_app_data_t m_lora_app_data = {p, n, LORAWAN_APP_PORT, 0, 0};
 
     lmh_error_status main_err = lmh_send(&m_lora_app_data, is_txconfirmed ? LMH_CONFIRMED_MSG : LMH_UNCONFIRMED_MSG);
@@ -506,7 +507,7 @@ bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
             log_w("No hay transmisión exitosa luego de timeout, se reintenta join...");
             _ts_errorAfterJoin = 0;
             _lw_needsInit = true;
-        } else {
+        } else if (p != NULL) {
             /**
              * NOTA: por Alex Villacís Lasso 2020/11/24
              * En caso de que falle el envío, probablemente es porque no se ha negociado
