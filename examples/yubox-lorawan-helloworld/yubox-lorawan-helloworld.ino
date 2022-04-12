@@ -157,7 +157,7 @@ void lorawan_payload(AsyncWebServerRequest * request)
 
     if (!clientError && !request->hasParam("payload", true)) {
         clientError = true;
-        responseMsg = "Sub-banda no presente";
+        responseMsg = "Payload no presente";
     }
     if (!clientError) {
         p = request->getParam("payload", true);
