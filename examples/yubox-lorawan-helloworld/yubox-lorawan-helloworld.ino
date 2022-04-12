@@ -45,6 +45,7 @@ void setup()
   // y verlo en gtkterm. No es en lo absoluto necesaria como algoritmo requerido.
   delay(3000);
   Serial.begin(115200);
+  Serial.setDebugOutput(true);
 
   YuboxLoRaWANConf.begin(yubox_HTTPServer);
 
