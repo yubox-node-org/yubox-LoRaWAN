@@ -10,8 +10,14 @@ void lorawan_rx(uint8_t *p, uint8_t n);
 
 void lorawan_payload(AsyncWebServerRequest * request);
 
-// Pines para estado y control de wifi
-const uint8_t PIN_WIFI_LED = GPIO_NUM_4;
+// 2022-04-06: En la tarjeta YUBOX One versión 3 en adelante, ya no existe
+//             control directo de LED vía GPIO_NUM_4
+//#define YUBOX_LED       GPIO_NUM_4
+
+// 2022-04-06: En la tarjeta YUBOX One versión 3 en adelante, se requiere
+//             activar el step-up de 5 voltios para que LoRaWAN funcione.
+#define YUBOX_ENABLE_5V   GPIO_NUM_4
+
 #if CONFIG_IDF_TARGET_ESP32
 const uint8_t PIN_WIFI_BTN = GPIO_NUM_36;
 #endif
@@ -19,11 +25,18 @@ const uint8_t PIN_WIFI_BTN = GPIO_NUM_36;
 bool requestedWiFiState = false;
 void setup()
 {
-  pinMode(digitalPinToInterrupt(PIN_WIFI_LED), OUTPUT);
-  digitalWrite(PIN_WIFI_LED, LOW);
+#ifdef YUBOX_LED
+  pinMode(digitalPinToInterrupt(YUBOX_LED), OUTPUT);
+  digitalWrite(YUBOX_LED, LOW);
+#endif
 #if CONFIG_IDF_TARGET_ESP32
   pinMode(digitalPinToInterrupt(PIN_WIFI_BTN), INPUT_PULLUP);
   digitalWrite(PIN_WIFI_BTN, HIGH);
+#endif
+#ifdef YUBOX_ENABLE_5V
+  // Se requiere activar 5V explícitamente para LoRaWAN y RS485
+  pinMode(YUBOX_ENABLE_5V, OUTPUT);
+  digitalWrite(YUBOX_ENABLE_5V, HIGH);
 #endif
 
   WiFi.onEvent(WiFiEvent_ledStatus);
@@ -32,6 +45,7 @@ void setup()
   // y verlo en gtkterm. No es en lo absoluto necesaria como algoritmo requerido.
   delay(3000);
   Serial.begin(115200);
+  Serial.setDebugOutput(true);
 
   YuboxLoRaWANConf.begin(yubox_HTTPServer);
 
@@ -94,13 +108,17 @@ void WiFiEvent_ledStatus(WiFiEvent_t event)
     ESP_LOGD(__FILE__, "[WiFi-event] event: %d", event);
     switch(event) {
     case SYSTEM_EVENT_STA_GOT_IP:
-        digitalWrite(PIN_WIFI_LED, HIGH);
+#ifdef YUBOX_LED
+        digitalWrite(YUBOX_LED, HIGH);
+#endif
         wifiConectado = true;
         break;
     case SYSTEM_EVENT_STA_DISCONNECTED:
     case SYSTEM_EVENT_STA_STOP:
     case SYSTEM_EVENT_AP_STOP:
-        digitalWrite(PIN_WIFI_LED, LOW);
+#ifdef YUBOX_LED
+        digitalWrite(YUBOX_LED, LOW);
+#endif
         wifiConectado = false;
         break;
     }
@@ -139,7 +157,7 @@ void lorawan_payload(AsyncWebServerRequest * request)
 
     if (!clientError && !request->hasParam("payload", true)) {
         clientError = true;
-        responseMsg = "Sub-banda no presente";
+        responseMsg = "Payload no presente";
     }
     if (!clientError) {
         p = request->getParam("payload", true);
