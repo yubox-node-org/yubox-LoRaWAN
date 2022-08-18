@@ -108,6 +108,13 @@ const int PIN_LORA_BUSY     = 18;   // LORA SPI BUSY
 const int PIN_LORA_DIO_1    =  8;   // LORA DIO_1
 const int RADIO_TXEN        = 16;   // LORA ANTENNA TX ENABLE
 const int RADIO_RXEN        = 15;   // LORA ANTENNA RX ENABLE
+
+#elif CONFIG_IDF_TARGET_ESP32S3
+const int PIN_LORA_RESET    = 17;   // LORA RESET
+const int PIN_LORA_BUSY     = 18;   // LORA SPI BUSY
+const int PIN_LORA_DIO_1    =  8;   // LORA DIO_1
+const int RADIO_TXEN        = 16;   // LORA ANTENNA TX ENABLE
+const int RADIO_RXEN        = 15;   // LORA ANTENNA RX ENABLE
 #else
 #error Undefined LORA pins for target!
 #endif
