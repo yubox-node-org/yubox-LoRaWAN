@@ -44,13 +44,28 @@ function setupLoRaWANTab()
     // https://getbootstrap.com/docs/4.4/components/navs/#events
     getYuboxNavTab('lorawan')
     .on('shown.bs.tab', function (e) {
+        const sel_region = pane.querySelector('select#region');
         const span_connstatus = pane.querySelector('form span#lorawan_connstatus');
         span_connstatus.classList.remove('badge-success', 'badge-danger');
         span_connstatus.classList.add('badge-secondary');
         span_connstatus.textContent = '(consultando)';
 
-        yuboxFetch('lorawan', 'config.json')
+        yuboxFetch('lorawan', 'regions.json')
         .then((data) => {
+            const prev_region = sel_region.value;
+            while (sel_region.firstChild) sel_region.removeChild(sel_region.firstChild);
+            for (var i = 0; i < data.length; i++) {
+                let opt = document.createElement('option');
+                opt.value = data[i].id;
+                opt.textContent = data[i].name;
+                opt.data = data[i];
+                sel_region.appendChild(opt);
+            }
+            sel_region.value = (prev_region == '') ? data[0].id : prev_region;
+            sel_region.dispatchEvent(new Event('change'));
+
+            return yuboxFetch('lorawan', 'config.json');
+        }).then((data) => {
             span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
             if (data.netjoined) {
                 span_connstatus.classList.add('badge-success');
@@ -61,7 +76,7 @@ function setupLoRaWANTab()
             }
 
             [
-                ['input#region',            data.region],
+                ['select#region',           data.region],
                 ['input#subband',           data.subband],
                 ['input#deviceEUI_ESP32',   lorawan_formatEUI(data.deviceEUI_ESP32)],
                 ['input#deviceEUI',         lorawan_formatEUI((data.deviceEUI == undefined) ? data.deviceEUI_ESP32 : data.deviceEUI)],
@@ -69,6 +84,8 @@ function setupLoRaWANTab()
                 ['input#appKey',            (data.appKey == undefined) ? '' : lorawan_formatEUI(data.appKey)],
                 ['input#tx_duty_sec',       data.tx_duty_sec]
             ].forEach(t => pane.querySelector(t[0]).value = t[1]);
+
+            sel_region.dispatchEvent(new Event('change'));
         }, (e) => { yuboxStdAjaxFailHandler(e); });
 
         if (!!window.EventSource) {
@@ -106,8 +123,22 @@ function setupLoRaWANTab()
         }
     });
 
+    pane.querySelector('select#region').addEventListener('change', function () {
+        const opt = this.querySelector('option[value="'+this.value+'"]');
+        const txt_subband = pane.querySelector('input#subband');
+        txt_subband.max = opt.data.max_sb;
+
+        const subband = parseInt(txt_subband.value);
+        if (isNaN(subband) || subband < 1) {
+            txt_subband.value = 1;
+        } else if (subband > opt.data.max_sb) {
+            txt_subband.value = opt.data.max_sb;
+        }
+    });
+
     pane.querySelector('button[name=apply]').addEventListener('click', function () {
         let postData = {
+            region:     pane.querySelector('select#region').value,
             subband:    pane.querySelector('input#subband').value,
             deviceEUI:  lorawan_unformatEUI(pane.querySelector('input#deviceEUI').value),
             appKey:     lorawan_unformatEUI(pane.querySelector('input#appKey').value),

@@ -54,7 +54,7 @@ static void lorawan_join_failed_handler(void);
 
 YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
 {
-    _lw_region = LORAMAC_REGION_US915;  // <-- TODO: volver configurable
+    _lw_region = LORAMAC_REGION_AU915;
     _lw_subband = 1;
     memset(_lw_devEUI, 0, sizeof(_lw_devEUI));
     memset(_lw_appEUI, 0, sizeof(_lw_appEUI));
@@ -168,11 +168,100 @@ void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
     LWPARAM_LOAD(devEUI)
     LWPARAM_LOAD(appEUI)
     LWPARAM_LOAD(appKey)
+    _lw_region = (LoRaMacRegion_t) nvram.getUChar("region", (uint8_t)LORAMAC_REGION_AU915);
     _lw_subband = nvram.getUChar("subband", 1);
     _tx_duty_sec = nvram.getUInt("txduty", LORAWAN_APP_DEFAULT_TX_DUTYCYCLE);
 
+    // Validar si región seleccionada es válida...
+    if (!_isValidLoRaWANRegion((uint8_t)_lw_region)) _lw_region = LORAMAC_REGION_AU915;
+
+    // Validar si sub-banda almacenada es válida para región...
+    if (_lw_subband < 1) _lw_subband = 1;
+    if (_lw_subband > _getMaxLoRaWANRegionSubchannel(_lw_region)) _lw_subband = 1;
+
     _lw_confExists = ok;
 }
+
+bool YuboxLoRaWANConfigClass::_isValidLoRaWANRegion(uint8_t r)
+{
+    switch (r) {
+    case LORAMAC_REGION_AS923:
+    case LORAMAC_REGION_AU915:
+    case LORAMAC_REGION_CN470:
+    case LORAMAC_REGION_CN779:
+    case LORAMAC_REGION_EU433:
+    case LORAMAC_REGION_EU868:
+    case LORAMAC_REGION_KR920:
+    case LORAMAC_REGION_IN865:
+    case LORAMAC_REGION_US915:
+    case LORAMAC_REGION_AS923_2:
+    case LORAMAC_REGION_AS923_3:
+    case LORAMAC_REGION_AS923_4:
+    case LORAMAC_REGION_RU864:
+        return true;
+    default:
+        return false;
+    }
+}
+
+const char * YuboxLoRaWANConfigClass::_getLoRaWANRegionName(LoRaMacRegion_t region)
+{
+    switch (region) {
+    case LORAMAC_REGION_AS923:
+        return "Asia 923 MHz";
+    case LORAMAC_REGION_AU915:
+        return "Australia 915 MHz";
+    case LORAMAC_REGION_CN470:
+        return "China 470 MHz";
+    case LORAMAC_REGION_CN779:
+        return "China 779 MHz";
+    case LORAMAC_REGION_EU433:
+        return "Europe 433 MHz";
+    case LORAMAC_REGION_EU868:
+        return "Europe 868 MHz";
+    case LORAMAC_REGION_KR920:
+        return "Korea 920 MHz";
+    case LORAMAC_REGION_IN865:
+        return "India 865 MHz";
+    case LORAMAC_REGION_US915:
+        return "US 915 MHz";
+    case LORAMAC_REGION_AS923_2:
+        return "Asia 923 MHz variante 2";
+    case LORAMAC_REGION_AS923_3:
+        return "Asia 923 MHz variante 3";
+    case LORAMAC_REGION_AS923_4:
+        return "Asia 923 MHz variante 4";
+    case LORAMAC_REGION_RU864:
+        return "Russia 864 MHz";
+    default:
+        return "(región no válida o no descrita)";
+    }
+}
+
+uint8_t YuboxLoRaWANConfigClass::_getMaxLoRaWANRegionSubchannel(LoRaMacRegion_t region)
+{
+    switch (region) {
+    case LORAMAC_REGION_AU915:
+    case LORAMAC_REGION_US915:
+        return 9;
+    case LORAMAC_REGION_CN470:
+        return 12;
+    case LORAMAC_REGION_CN779:
+    case LORAMAC_REGION_EU433:
+    case LORAMAC_REGION_EU868:
+    case LORAMAC_REGION_KR920:
+    case LORAMAC_REGION_IN865:
+        return 2;
+    case LORAMAC_REGION_AS923:
+    case LORAMAC_REGION_AS923_2:
+    case LORAMAC_REGION_AS923_3:
+    case LORAMAC_REGION_AS923_4:
+    case LORAMAC_REGION_RU864:
+    default:
+        return 1;
+    }
+}
+
 
 void YuboxLoRaWANConfigClass::_setupHTTPRoutes(AsyncWebServer & srv)
 {
@@ -182,6 +271,7 @@ void YuboxLoRaWANConfigClass::_setupHTTPRoutes(AsyncWebServer & srv)
   YuboxWebAuth.addManagedHandler(_pEvents);
   srv.addHandler(_pEvents);
   _pEvents->onConnect(std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawan_status_onConnect, this, std::placeholders::_1));
+  srv.on("/yubox-api/lorawan/regions.json", HTTP_GET, std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanregionsjson_GET, this, std::placeholders::_1));
 }
 
 String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
@@ -209,42 +299,36 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawan_status_onConnect(As
     c->send(json_str.c_str());
 }
 
+void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanregionsjson_GET(AsyncWebServerRequest * request)
+{
+    YUBOX_RUN_AUTH(request);
+
+    // Cuántas regiones soporta esta versión de la biblioteca?
+    uint8_t numRegions = 0;
+    while (_isValidLoRaWANRegion(numRegions)) numRegions++;
+
+    AsyncResponseStream *response = request->beginResponseStream("application/json");
+    DynamicJsonDocument json_doc(JSON_ARRAY_SIZE(numRegions) + numRegions * JSON_OBJECT_SIZE(3));
+
+    for (auto i = 0; i < numRegions; i++) {
+        JsonObject region = json_doc.createNestedObject();
+        region["id"] = i;
+        region["name"] = _getLoRaWANRegionName((LoRaMacRegion_t)i);
+        region["max_sb"] = _getMaxLoRaWANRegionSubchannel((LoRaMacRegion_t)i);
+    }
+
+    serializeJson(json_doc, *response);
+    request->send(response);
+}
+
 void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(AsyncWebServerRequest * request)
 {
-  YUBOX_RUN_AUTH(request);
-  
-  AsyncResponseStream *response = request->beginResponseStream("application/json");
-  DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(8));
+    YUBOX_RUN_AUTH(request);
 
-  switch (_lw_region) {
-  case LORAMAC_REGION_US915:
-    json_doc["region"] = "US 915 MHz";
-    break;
-  case LORAMAC_REGION_AS923:
-    json_doc["region"] = "Asia 923 MHz";
-    break;
-  case LORAMAC_REGION_AU915:
-    json_doc["region"] = "Australia 915 MHz";
-    break;
-  case LORAMAC_REGION_CN470:
-    json_doc["region"] = "China 470 MHz";
-    break;
-  case LORAMAC_REGION_CN779:
-    json_doc["region"] = "China 779 MHz";
-    break;
-  case LORAMAC_REGION_EU433:
-    json_doc["region"] = "Europe 433 MHz";
-    break;
-  case LORAMAC_REGION_EU868:
-    json_doc["region"] = "Europe 868 MHz";
-    break;
-  case LORAMAC_REGION_IN865:
-    json_doc["region"] = "India 865 MHz";
-    break;
-  case LORAMAC_REGION_KR920:
-    json_doc["region"] = "Korea 920 MHz";
-    break;
-    }
+    AsyncResponseStream *response = request->beginResponseStream("application/json");
+    DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(9));
+
+    json_doc["region"] = (unsigned int)_lw_region;
     String s_default_devEUI = _bin2str(_lw_default_devEUI, sizeof(_lw_default_devEUI));
     String s_devEUI = _lw_confExists ? _bin2str(_lw_devEUI, sizeof(_lw_devEUI)) : s_default_devEUI;
     String s_appEUI = _lw_confExists ? _bin2str(_lw_appEUI, sizeof(_lw_appEUI)) : "";
@@ -270,26 +354,35 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
     String responseMsg = "";
     AsyncWebParameter * p;
 
-    uint32_t n_subband;
+    uint8_t n_region = (uint8_t)_lw_region;
+    uint8_t n_subband = _lw_subband;
     uint8_t n_deviceEUI[8];
     uint8_t n_appEUI[8];
     uint8_t n_appKey[16];
 
     uint32_t n_tx_duty_sec = getRequestedTXDutyCycle();
 
-    if (!clientError && !request->hasParam("subband", true)) {
-        clientError = true;
-        responseMsg = "Sub-banda no presente";
+    if (!clientError && request->hasParam("region", true)) {
+        p = request->getParam("region", true);
+
+        if (0 >= sscanf(p->value().c_str(), "%hhu", &n_region)) {
+            clientError = true;
+            responseMsg = "ID de región no numérico";
+        } else if (!_isValidLoRaWANRegion(n_region)) {
+            clientError = true;
+            responseMsg = "ID de región no válido o no implementado";
+        }
     }
-    if (!clientError) {
+
+    if (!clientError && request->hasParam("subband", true)) {
         p = request->getParam("subband", true);
 
-        if (0 >= sscanf(p->value().c_str(), "%ld", &n_subband)) {
+        if (0 >= sscanf(p->value().c_str(), "%hhu", &n_subband)) {
             clientError = true;
             responseMsg = "Sub-banda no numérico";
-        } else if (!(n_subband >= 1 && n_subband <= 8)) {
+        } else if (!(n_subband >= 1 && n_subband <= _getMaxLoRaWANRegionSubchannel((LoRaMacRegion_t)n_region))) {
             clientError = true;
-            responseMsg = "Sub-banda no está en rango 1..8";
+            responseMsg = "Sub-banda no está en rango requerido para región";
         }
     }
 
@@ -333,6 +426,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
         memcpy(_lw_devEUI, n_deviceEUI, sizeof(_lw_devEUI));
         memcpy(_lw_appEUI, n_appEUI, sizeof(_lw_appEUI));
         memcpy(_lw_appKey, n_appKey, sizeof(_lw_appKey));
+        _lw_region = (LoRaMacRegion_t)n_region;
         _lw_subband = n_subband;
 
         serverError = !_saveCredentialsToNVRAM();
@@ -401,6 +495,7 @@ bool YuboxLoRaWANConfigClass::_saveCredentialsToNVRAM(void)
     Preferences nvram;
     nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
 
+    if (ok && !nvram.putUChar("region", (uint8_t)_lw_region)) ok = false;
     if (ok && !nvram.putUChar("subband", _lw_subband)) ok = false;
     if (ok && !nvram.putBytes("devEUI", _lw_devEUI, sizeof(_lw_devEUI))) ok = false;
     if (ok && !nvram.putBytes("appEUI", _lw_appEUI, sizeof(_lw_appEUI))) ok = false;
@@ -462,7 +557,8 @@ void YuboxLoRaWANConfigClass::update(void)
             log_e("lmh_setSubBandChannels(%d) failed. Wrong sub band requested?", _lw_subband);
             _joinfail_handler();
         } else {
-            log_i("Starting join LoRaWAN network (subband %d)...", _lw_subband);
+            log_i("Starting join LoRaWAN network (region %s subband %d)...",
+                _getLoRaWANRegionName(_lw_region), _lw_subband);
             lmh_join();
             _joinstart_handler();
         }

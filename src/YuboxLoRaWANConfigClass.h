@@ -31,7 +31,7 @@ private:
   LoRaMacRegion_t _lw_region;
 
   // Sub-banda a usar para conexión inicial a red
-  unsigned int _lw_subband;
+  uint8_t _lw_subband;
 
   // Identificador sacado de MAC de ESP32, convertido en EUI
   uint8_t _lw_default_devEUI[8];
@@ -70,6 +70,10 @@ private:
   void _loadSavedCredentialsFromNVRAM(void);
   bool _saveCredentialsToNVRAM(void);
 
+  bool _isValidLoRaWANRegion(uint8_t);
+  uint8_t _getMaxLoRaWANRegionSubchannel(LoRaMacRegion_t);
+  const char * _getLoRaWANRegionName(LoRaMacRegion_t);
+
   void _setupHTTPRoutes(AsyncWebServer &);
 
   String _reportActivityJSON(void);
@@ -77,6 +81,7 @@ private:
   void _routeHandler_yuboxAPI_lorawan_status_onConnect(AsyncEventSourceClient *);
   void _routeHandler_yuboxAPI_lorawanconfigjson_GET(AsyncWebServerRequest *);
   void _routeHandler_yuboxAPI_lorawanconfigjson_POST(AsyncWebServerRequest *);
+  void _routeHandler_yuboxAPI_lorawanregionsjson_GET(AsyncWebServerRequest *);
 
   String _bin2str(uint8_t *, size_t);
   bool _str2bin(const char *, uint8_t *, size_t);
