@@ -50,6 +50,20 @@ function setupLoRaWANTab()
         span_connstatus.classList.add('badge-secondary');
         span_connstatus.textContent = '(consultando)';
 
+        const lw_updatestatus = (data) => {
+            span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
+            const nstatus = {
+                'RESET':    ['badge-secondary', 'NO CONECTADO'],
+                'FAILED':   ['badge-danger',    'FALLO CONEXIÓN'],
+                'ONGOING':  ['badge-warning',   'CONECTANDO...'],
+                'SET':      ['badge-success',   'CONECTADO']
+            };
+            if (data.join in nstatus) {
+                span_connstatus.classList.add(nstatus[data.join][0]);
+                span_connstatus.textContent = nstatus[data.join][1]
+            }
+        };
+
         yuboxFetch('lorawan', 'regions.json')
         .then((data) => {
             const prev_region = sel_region.value;
@@ -66,14 +80,7 @@ function setupLoRaWANTab()
 
             return yuboxFetch('lorawan', 'config.json');
         }).then((data) => {
-            span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
-            if (data.netjoined) {
-                span_connstatus.classList.add('badge-success');
-                span_connstatus.textContent = 'CONECTADO';
-            } else {
-                span_connstatus.classList.add('badge-danger');
-                span_connstatus.textContent = 'NO CONECTADO';
-            }
+            lw_updatestatus(data);
 
             [
                 ['select#region',           data.region],
@@ -93,17 +100,7 @@ function setupLoRaWANTab()
             sse.addEventListener('message', function (e) {
                 let data = JSON.parse(e.data);
 
-                span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
-                const nstatus = {
-                    'RESET':    ['badge-secondary', 'NO CONECTADO'],
-                    'FAILED':   ['badge-danger',    'FALLO CONEXIÓN'],
-                    'ONGOING':  ['badge-warning',   'CONECTANDO...'],
-                    'SET':      ['badge-success',   'CONECTADO']
-                };
-                if (data.join in nstatus) {
-                    span_connstatus.classList.add(nstatus[data.join][0]);
-                    span_connstatus.textContent = nstatus[data.join][1]
-                }
+                lw_updatestatus(data);
 
                 [ 'rx', 'tx_ok', 'tx_fail' ]
                 .forEach(k => pane.querySelector('div.lorawan-stats#'+k).textContent = lorawan_format_tsactivity(data[k], data.ts));

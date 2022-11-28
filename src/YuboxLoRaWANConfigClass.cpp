@@ -338,7 +338,12 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
     json_doc["appEUI"] = s_appEUI.c_str();
     json_doc["appKey"] = s_appKey.c_str();
     json_doc["subband"] = _lw_subband;
-    json_doc["netjoined"] = (lmh_join_status_get() == LMH_SET);
+    switch (lmh_join_status_get()) {
+    case LMH_RESET:     json_doc["join"] = "RESET"; break;
+    case LMH_SET:       json_doc["join"] = "SET"; break;
+    case LMH_ONGOING:   json_doc["join"] = "ONGOING"; break;
+    case LMH_FAILED:    json_doc["join"] = "FAILED"; break;
+    }
     json_doc["tx_duty_sec"] = getRequestedTXDutyCycle();
 
     serializeJson(json_doc, *response);
