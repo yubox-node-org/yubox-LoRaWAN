@@ -19,6 +19,8 @@ typedef void (*YuboxLoRaWAN_rx_cb)(uint8_t *, uint8_t);
 typedef std::function<void (uint8_t *, uint8_t) > YuboxLoRaWAN_rx_func_cb;
 typedef void (*YuboxLoRaWAN_txdutychange_cb)(void);
 typedef std::function<void (void) > YuboxLoRaWAN_txdutychange_func_cb;
+typedef void (*YuboxLoRaWAN_txconfirm_cb)(bool);
+typedef std::function<void (bool) > YuboxLoRaWAN_txconfirm_func_cb;
 
 typedef size_t yuboxlorawan_event_id_t;
 
@@ -67,6 +69,9 @@ private:
   uint32_t _tx_duty_sec;
   bool _tx_duty_sec_changed;
 
+  // Bandera de reportar si se está esperando confirmación de una transmisión
+  bool _tx_waiting_confirm;
+
   void _loadSavedCredentialsFromNVRAM(void);
   bool _saveCredentialsToNVRAM(void);
 
@@ -97,6 +102,9 @@ public:
   // Verificar si efectivamente ya se ha unido a red LoRaWAN
   bool isJoined(void);
 
+  // Verificar si se está todavía esperando la confirmación de una transmisión confirmada
+  bool isWaitingConfirmation(void) { return _tx_waiting_confirm; }
+
   // Instalar callback para aviso de unión exitosa a LoRaWAN
   yuboxlorawan_event_id_t onJoin(YuboxLoRaWAN_join_cb cbRX);
   yuboxlorawan_event_id_t onJoin(YuboxLoRaWAN_join_func_cb cbRX);
@@ -115,6 +123,12 @@ public:
   void removeTXDuty(YuboxLoRaWAN_txdutychange_cb cb);
   void removeTXDuty(yuboxlorawan_event_id_t id);
 
+  // Instalar callback para confirmación de éxito o fallo de TX confirmado
+  yuboxlorawan_event_id_t onTXConfirm(YuboxLoRaWAN_txconfirm_cb cb);
+  yuboxlorawan_event_id_t onTXConfirm(YuboxLoRaWAN_txconfirm_func_cb cb);
+  void removeTXConfirm(YuboxLoRaWAN_txconfirm_cb cb);
+  void removeTXConfirm(yuboxlorawan_event_id_t cb);
+
   uint32_t getRequestedTXDutyCycle(void) { return _tx_duty_sec; }
   bool setRequestedTXDutyCycle(uint32_t);
 
@@ -126,6 +140,7 @@ public:
   void _join_handler(void);
   void _joinfail_handler(void);
   void _rx_handler(uint8_t *, uint8_t);
+  void _tx_confirmed_result(bool);
 };
 
 extern YuboxLoRaWANConfigClass YuboxLoRaWANConf;
