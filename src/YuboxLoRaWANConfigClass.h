@@ -52,6 +52,9 @@ private:
   uint32_t _lw_DevAddr;
   bool _lw_useOTAA;
 
+  uint32_t _lw_UpLinkCounter;
+  uint32_t _lw_DownLinkCounter;
+
   // Se establece bandera a VERDADERO luego de inicio exitoso de hardware LoRaWAN
   bool _lorahw_init;
 
@@ -83,6 +86,9 @@ private:
   bool _saveCredentialsToNVRAM(void);
   void _clearSessionKeys(void);
   void _destroySessionKeys(Preferences &);
+
+  void _saveFrameCounters(Preferences &);
+  void _saveFrameCounters(void);
 
   bool _isValidLoRaWANRegion(uint8_t);
   uint8_t _getMaxLoRaWANRegionSubchannel(LoRaMacRegion_t);

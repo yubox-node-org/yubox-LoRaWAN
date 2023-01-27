@@ -106,6 +106,8 @@ void YuboxLoRaWANConfigClass::_clearSessionKeys()
     memset(_lw_NwkSKey, 0, sizeof(_lw_NwkSKey));
     memset(_lw_AppSKey, 0, sizeof(_lw_AppSKey));
     _lw_DevAddr = 0;
+    _lw_UpLinkCounter = 0;
+    _lw_DownLinkCounter = 0;
     _lw_useOTAA = true;
 }
 
@@ -115,6 +117,34 @@ void YuboxLoRaWANConfigClass::_destroySessionKeys(Preferences & nvram)
     nvram.remove("NwkSKey");
     nvram.remove("AppSKey");
     nvram.remove("devaddr");
+    nvram.remove("uplinkcnt");
+    nvram.remove("downlinkcnt");
+}
+
+void YuboxLoRaWANConfigClass::_saveFrameCounters(Preferences & nvram)
+{
+    MibRequestConfirm_t mibReq;
+
+    memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+    mibReq.Type = MIB_UPLINK_COUNTER;
+    LoRaMacMibGetRequestConfirm(&mibReq);
+    _lw_UpLinkCounter = mibReq.Param.UpLinkCounter;
+    log_d("- UpLinkCounter = %u", _lw_UpLinkCounter);
+    nvram.putUInt("uplinkcnt", _lw_UpLinkCounter);
+
+    memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+    mibReq.Type = MIB_DOWNLINK_COUNTER;
+    LoRaMacMibGetRequestConfirm(&mibReq);
+    _lw_DownLinkCounter = mibReq.Param.DownLinkCounter;
+    log_d("- DownLinkCounter = %u", _lw_DownLinkCounter);
+    nvram.putUInt("downlinkcnt", _lw_DownLinkCounter);
+}
+
+void YuboxLoRaWANConfigClass::_saveFrameCounters(void)
+{
+    Preferences nvram;
+    nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+    _saveFrameCounters(nvram);
 }
 
 // ESP32 - SX126x pin configuration
@@ -212,7 +242,11 @@ void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
         LWPARAM_LOAD(NwkSKey)
         LWPARAM_LOAD(AppSKey)
         if (!nvram.isKey("devaddr")) ok = false;
-        if (ok) _lw_DevAddr = nvram.getUInt("devaddr", 0);
+        if (ok) _lw_DevAddr = nvram.getUInt("devaddr", 0); if (_lw_DevAddr == 0) ok = false;
+        if (ok) _lw_UpLinkCounter = nvram.getUInt("uplinkcnt", 0); if (_lw_UpLinkCounter == 0) ok = false;
+
+        // Contador de downlink puede se legítimamente 0 si sólo se envía y no recibe.
+        if (ok) _lw_DownLinkCounter = nvram.getUInt("downlinkcnt", 0);
 
         if (ok) _lw_useOTAA = false;
     }
@@ -652,6 +686,8 @@ bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
 
     lmh_error_status main_err = lmh_send(&m_lora_app_data, is_txconfirmed ? LMH_CONFIRMED_MSG : LMH_UNCONFIRMED_MSG);
 
+    _saveFrameCounters();
+
     if (main_err != LMH_SUCCESS) {
         uint32_t t = millis();
         _ts_ultimoTX_FAIL = t;
@@ -903,6 +939,20 @@ void YuboxLoRaWANConfigClass::_join_handler(void)
         if (!ok) _destroySessionKeys(nvram);
 
         if (ok) log_d("Claves de sesión negociadas por OTAA fueron guardadas");
+    } else {
+        MibRequestConfirm_t mibReq;
+
+        log_d("Restaurando contadores UpLink=%u DownLink=%u", _lw_UpLinkCounter, _lw_DownLinkCounter);
+
+        memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+        mibReq.Type = MIB_UPLINK_COUNTER;
+        mibReq.Param.UpLinkCounter = _lw_UpLinkCounter;
+        LoRaMacMibSetRequestConfirm(&mibReq);
+
+        memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+        mibReq.Type = MIB_DOWNLINK_COUNTER;
+        mibReq.Param.DownLinkCounter = _lw_DownLinkCounter;
+        LoRaMacMibSetRequestConfirm(&mibReq);
     }
 
     if (_pEvents != NULL && _pEvents->count() > 0) {
@@ -940,6 +990,8 @@ void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n)
         String json_str = _reportActivityJSON();
         _pEvents->send(json_str.c_str());
     }
+
+    _saveFrameCounters();
 }
 
 void YuboxLoRaWANConfigClass::_txdutychange_handler(void)
