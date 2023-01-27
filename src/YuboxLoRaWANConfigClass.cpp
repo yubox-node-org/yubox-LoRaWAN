@@ -946,12 +946,12 @@ void YuboxLoRaWANConfigClass::_join_handler(void)
 
         memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
         mibReq.Type = MIB_UPLINK_COUNTER;
-        mibReq.Param.UpLinkCounter = _lw_UpLinkCounter;
+        mibReq.Param.UpLinkCounter = _lw_UpLinkCounter + 1;
         LoRaMacMibSetRequestConfirm(&mibReq);
 
         memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
         mibReq.Type = MIB_DOWNLINK_COUNTER;
-        mibReq.Param.DownLinkCounter = _lw_DownLinkCounter;
+        mibReq.Param.DownLinkCounter = _lw_DownLinkCounter + 1;
         LoRaMacMibSetRequestConfirm(&mibReq);
     }
 
