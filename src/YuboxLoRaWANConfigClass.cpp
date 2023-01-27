@@ -70,6 +70,9 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     _lorahw_init = false;
     _tx_waiting_confirm = false;
 
+    // Estas claves se asumen pendientes de negociar
+    _clearSessionKeys();
+
     lmh_callback_t lora_callbacks = {
         BoardGetBatteryLevel,
         BoardGetUniqueId,
@@ -96,7 +99,22 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     _ts_ultimoRX = 0;
     _tx_duty_sec = LORAWAN_APP_DEFAULT_TX_DUTYCYCLE;
     _tx_duty_sec_changed = false;
+}
 
+void YuboxLoRaWANConfigClass::_clearSessionKeys()
+{
+    memset(_lw_NwkSKey, 0, sizeof(_lw_NwkSKey));
+    memset(_lw_AppSKey, 0, sizeof(_lw_AppSKey));
+    _lw_DevAddr = 0;
+    _lw_useOTAA = true;
+}
+
+void YuboxLoRaWANConfigClass::_destroySessionKeys(Preferences & nvram)
+{
+    _clearSessionKeys();
+    nvram.remove("NwkSKey");
+    nvram.remove("AppSKey");
+    nvram.remove("devaddr");
 }
 
 // ESP32 - SX126x pin configuration
@@ -188,6 +206,18 @@ void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
     if (_lw_subband > _getMaxLoRaWANRegionSubchannel(_lw_region)) _lw_subband = 1;
 
     _lw_confExists = ok;
+
+    if (ok) {
+        // Cargar claves de sesión, si están presentes
+        LWPARAM_LOAD(NwkSKey)
+        LWPARAM_LOAD(AppSKey)
+        if (!nvram.isKey("devaddr")) ok = false;
+        if (ok) _lw_DevAddr = nvram.getUInt("devaddr", 0);
+
+        if (ok) _lw_useOTAA = false;
+    }
+
+    if (!ok) _clearSessionKeys();
 }
 
 bool YuboxLoRaWANConfigClass::_isValidLoRaWANRegion(uint8_t r)
@@ -514,6 +544,9 @@ bool YuboxLoRaWANConfigClass::_saveCredentialsToNVRAM(void)
     if (ok && !nvram.putBytes("appEUI", _lw_appEUI, sizeof(_lw_appEUI))) ok = false;
     if (ok && !nvram.putBytes("appKey", _lw_appKey, sizeof(_lw_appKey))) ok = false;
 
+    // Cuando se guardan nuevas claves, se debe asumir que las claves de sesión se invalidan
+    _destroySessionKeys(nvram);
+
     nvram.end();
     return ok;
 }
@@ -552,6 +585,9 @@ void YuboxLoRaWANConfigClass::update(void)
         lmh_setDevEui(_lw_devEUI);
         lmh_setAppEui(_lw_appEUI);
         lmh_setAppKey(_lw_appKey);
+        lmh_setNwkSKey(_lw_NwkSKey);
+        lmh_setAppSKey(_lw_AppSKey);
+        lmh_setDevAddr(_lw_DevAddr);
 
         lmh_param_t lora_param_init = {
             LORAWAN_ADR_ON,
@@ -563,7 +599,8 @@ void YuboxLoRaWANConfigClass::update(void)
             LORAWAN_DUTYCYCLE_OFF
         };
 
-        uint32_t err_code = lmh_init(&_lora_callbacks, lora_param_init, true, CLASS_A, _lw_region);
+        log_d("Para esta unión a la red LoRaWAN %s se usará OTAA...", _lw_useOTAA ? "SÍ" : "NO");
+        uint32_t err_code = lmh_init(&_lora_callbacks, lora_param_init, _lw_useOTAA, CLASS_A, _lw_region);
         if (err_code != 0) {
             log_e("lmh_init failed - %d", err_code);
             _joinfail_handler();
@@ -573,8 +610,8 @@ void YuboxLoRaWANConfigClass::update(void)
         } else {
             log_i("Starting join LoRaWAN network (region %s subband %d)...",
                 _getLoRaWANRegionName(_lw_region), _lw_subband);
-            lmh_join();
             _joinstart_handler();
+            lmh_join();
         }
     } else {
         // En versión 2.0.0+ el proceso de IRQ se mueve a tarea separada
@@ -624,6 +661,14 @@ bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
             log_w("No hay transmisión exitosa luego de timeout, se reintenta join...");
             _ts_errorAfterJoin = 0;
             _lw_needsInit = true;
+
+            // Destruir cualquier clave de sesión, porque debe volverse a negociar OTAA
+            if (!_lw_useOTAA) {
+                Preferences nvram;
+                nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+
+                _destroySessionKeys(nvram);
+            }
         } else if (p != NULL) {
             /**
              * NOTA: por Alex Villacís Lasso 2020/11/24
@@ -822,6 +867,44 @@ void YuboxLoRaWANConfigClass::removeTXConfirm(yuboxlorawan_event_id_t id)
 
 void YuboxLoRaWANConfigClass::_join_handler(void)
 {
+    if (_lw_useOTAA) {
+        // Luego de negociar OTAA, se disponen de claves de sesión que deben ser guardadas
+        MibRequestConfirm_t mibReq;
+
+        log_d("Claves de sesión negociadas luego de OTAA, se intenta recuperar y guardar...");
+
+        // Recuperar en memoria los parámetros negociados
+        memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+        mibReq.Type = MIB_DEV_ADDR;
+        LoRaMacMibGetRequestConfirm(&mibReq);
+        _lw_DevAddr = mibReq.Param.DevAddr;
+
+        memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+        mibReq.Type = MIB_NWK_SKEY;
+        LoRaMacMibGetRequestConfirm(&mibReq);
+        memcpy(_lw_NwkSKey, mibReq.Param.NwkSKey, sizeof(_lw_NwkSKey));
+
+        memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+        mibReq.Type = MIB_APP_SKEY;
+        LoRaMacMibGetRequestConfirm(&mibReq);
+        memcpy(_lw_AppSKey, mibReq.Param.AppSKey, sizeof(_lw_AppSKey));
+
+        _lw_useOTAA = false;
+
+        // Guardar inmediatamente en NVRAM...
+        bool ok = true;
+        Preferences nvram;
+        nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+
+        if (ok && !nvram.putBytes("NwkSKey", _lw_NwkSKey, sizeof(_lw_NwkSKey))) ok = false;
+        if (ok && !nvram.putBytes("AppSKey", _lw_AppSKey, sizeof(_lw_AppSKey))) ok = false;
+        if (ok && !nvram.putUInt("devaddr", _lw_DevAddr)) ok = false;
+
+        if (!ok) _destroySessionKeys(nvram);
+
+        if (ok) log_d("Claves de sesión negociadas por OTAA fueron guardadas");
+    }
+
     if (_pEvents != NULL && _pEvents->count() > 0) {
         String json_str = _reportActivityJSON();
         _pEvents->send(json_str.c_str());

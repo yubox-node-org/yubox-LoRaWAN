@@ -45,6 +45,13 @@ private:
   bool _lw_confExists;
   bool _lw_needsInit;
 
+  // Si no hay claves AES negociadas previamente, es necesario usar OTAA para obtenerlas.
+  // De otro modo, se las ha leído de NVRAM y puede saltarse la negociación OTAA.
+  uint8_t _lw_NwkSKey[16];
+  uint8_t _lw_AppSKey[16];
+  uint32_t _lw_DevAddr;
+  bool _lw_useOTAA;
+
   // Se establece bandera a VERDADERO luego de inicio exitoso de hardware LoRaWAN
   bool _lorahw_init;
 
@@ -74,6 +81,8 @@ private:
 
   void _loadSavedCredentialsFromNVRAM(void);
   bool _saveCredentialsToNVRAM(void);
+  void _clearSessionKeys(void);
+  void _destroySessionKeys(Preferences &);
 
   bool _isValidLoRaWANRegion(uint8_t);
   uint8_t _getMaxLoRaWANRegionSubchannel(LoRaMacRegion_t);
