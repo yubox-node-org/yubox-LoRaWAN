@@ -243,7 +243,7 @@ void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
         LWPARAM_LOAD(AppSKey)
         if (!nvram.isKey("devaddr")) ok = false;
         if (ok) _lw_DevAddr = nvram.getUInt("devaddr", 0); if (_lw_DevAddr == 0) ok = false;
-        if (ok) _lw_UpLinkCounter = nvram.getUInt("uplinkcnt", 0); if (_lw_UpLinkCounter == 0) ok = false;
+        if (ok) _lw_UpLinkCounter = nvram.getUInt("uplinkcnt", 0);
 
         // Contador de downlink puede se legítimamente 0 si sólo se envía y no recibe.
         if (ok) _lw_DownLinkCounter = nvram.getUInt("downlinkcnt", 0);
