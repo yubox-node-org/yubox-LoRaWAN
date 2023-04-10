@@ -129,14 +129,14 @@ void YuboxLoRaWANConfigClass::_saveFrameCounters(Preferences & nvram)
     mibReq.Type = MIB_UPLINK_COUNTER;
     LoRaMacMibGetRequestConfirm(&mibReq);
     _lw_UpLinkCounter = mibReq.Param.UpLinkCounter;
-    log_d("- UpLinkCounter = %u", _lw_UpLinkCounter);
+    log_v("- UpLinkCounter = %u", _lw_UpLinkCounter);
     nvram.putUInt("uplinkcnt", _lw_UpLinkCounter);
 
     memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
     mibReq.Type = MIB_DOWNLINK_COUNTER;
     LoRaMacMibGetRequestConfirm(&mibReq);
     _lw_DownLinkCounter = mibReq.Param.DownLinkCounter;
-    log_d("- DownLinkCounter = %u", _lw_DownLinkCounter);
+    log_v("- DownLinkCounter = %u", _lw_DownLinkCounter);
     nvram.putUInt("downlinkcnt", _lw_DownLinkCounter);
 }
 
