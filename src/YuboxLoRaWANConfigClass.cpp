@@ -1036,13 +1036,8 @@ static void lorawan_confirm_class_handler(DeviceClass_t Class)
 
 static void lorawan_has_joined_handler(void)
 {
-#if (OVER_THE_AIR_ACTIVATION != 0)
-    log_i("Network Joined");
-#else
-    log_i("OVER_THE_AIR_ACTIVATION != 0");
-#endif
-  lmh_class_request(CLASS_A);
-  YuboxLoRaWANConf._join_handler();
+    lmh_class_request(CLASS_A);
+    YuboxLoRaWANConf._join_handler();
 }
 
 static void lorawan_join_failed_handler(void)
