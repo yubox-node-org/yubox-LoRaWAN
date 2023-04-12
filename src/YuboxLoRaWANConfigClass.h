@@ -81,6 +81,9 @@ private:
 
   // Bandera de reportar si se está esperando confirmación de una transmisión
   bool _tx_waiting_confirm;
+  uint32_t _ts_confirmTX_start;
+  uint32_t _num_confirmTX_OK;
+  uint32_t _num_confirmTX_FAIL;
 
   void _loadSavedCredentialsFromNVRAM(void);
   bool _saveCredentialsToNVRAM(void);
@@ -96,6 +99,7 @@ private:
 
   void _setupHTTPRoutes(AsyncWebServer &);
 
+  void _sendActivityEventJSON(void);
   String _reportActivityJSON(void);
 
   void _routeHandler_yuboxAPI_lorawan_status_onConnect(AsyncEventSourceClient *);

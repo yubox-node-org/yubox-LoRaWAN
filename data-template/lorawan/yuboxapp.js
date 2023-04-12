@@ -46,9 +46,13 @@ function setupLoRaWANTab()
     .on('shown.bs.tab', function (e) {
         const sel_region = pane.querySelector('select#region');
         const span_connstatus = pane.querySelector('form span#lorawan_connstatus');
+        const span_txconfstatus = pane.querySelector('form span#lorawan_txconfstatus');
         span_connstatus.classList.remove('badge-success', 'badge-danger');
         span_connstatus.classList.add('badge-secondary');
         span_connstatus.textContent = '(consultando)';
+        span_txconfstatus.classList.remove('badge-secondary', 'badge-info');
+        span_txconfstatus.classList.add('badge-secondary');
+        span_txconfstatus.textContent = '(consultando)';
 
         const lw_updatestatus = (data) => {
             span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
@@ -61,6 +65,17 @@ function setupLoRaWANTab()
             if (data.join in nstatus) {
                 span_connstatus.classList.add(nstatus[data.join][0]);
                 span_connstatus.textContent = nstatus[data.join][1]
+            }
+
+            if ('confirmtx_start' in data) {
+                span_txconfstatus.classList.remove('badge-secondary', 'badge-info');
+                if (data.confirmtx_start == null) {
+                    span_txconfstatus.classList.add('badge-secondary');
+                    span_txconfstatus.textContent = 'INACTIVO';
+                } else {
+                    span_txconfstatus.classList.add('badge-info');
+                    span_txconfstatus.textContent = 'EN PROCESO';
+                }
             }
         };
 
@@ -102,8 +117,21 @@ function setupLoRaWANTab()
 
                 lw_updatestatus(data);
 
-                [ 'rx', 'tx_ok', 'tx_fail' ]
-                .forEach(k => pane.querySelector('div.lorawan-stats#'+k).textContent = lorawan_format_tsactivity(data[k], data.ts));
+                [ 'rx', 'tx_ok', 'tx_fail', 'confirmtx_start' ]
+                .forEach(k => {
+                    var div_stats = pane.querySelector('div.lorawan-stats#'+k);
+                    if (div_stats != null)
+                        div_stats.textContent = lorawan_format_tsactivity(data[k], data.ts);
+                    else console.error('No se encuentra selector', 'div.lorawan-stats#'+k);
+                });
+                [ 'num_confirmtx_ok', 'num_confirmtx_fail' ]
+                .forEach(k => {
+                    var div_stats = pane.querySelector('div.lorawan-stats#'+k);
+                    if (div_stats != null)
+                        div_stats.textContent = data[k];
+                    else console.error('No se encuentra selector', 'div.lorawan-stats#'+k);
+                });
+                if (data.confirmtx_start != null) {}
             });
             sse.addEventListener('error', function (e) {
                 yuboxMostrarAlertText('danger', 'Se ha perdido conexión con dispositivo para monitoreo LoRaWAN');

@@ -14,18 +14,33 @@
             </div>
 
             <div class="form-group row">
-                <legend class="col-form-label col">Red LoRaWAN:</legend>
-                <div class="col-form-label col-sm-2">
+                <legend class="col-form-label col-6 col-md-3 col-lg">Red LoRaWAN:</legend>
+                <div class="col-form-label col-6 col-md-3 col-lg">
                     <h5>
                     <span id="lorawan_connstatus" class="badge badge-danger">NO CONECTADO</span>
                     </h5>
                 </div>
-                <legend class="col-form-label col">Últ. éxito TX</legend>
-                <div class="col-form-label col-sm-2 lorawan-stats" id="tx_ok">?</div>
-                <legend class="col-form-label col">Últ. fallo TX</legend>
-                <div class="col-form-label col-sm-2 lorawan-stats" id="tx_fail">?</div>
-                <legend class="col-form-label col">Última RX</legend>
-                <div class="col-form-label col-sm-2 lorawan-stats" id="rx">?</div>
+                <legend class="col-form-label col-6 col-md-3 col-lg">Últ. éxito TX</legend>
+                <div class="col-form-label col-6 col-md-3 col-lg lorawan-stats" id="tx_ok">?</div>
+                <legend class="col-form-label col-6 col-md-3 col-lg">Últ. fallo TX</legend>
+                <div class="col-form-label col-6 col-md-3 col-lg lorawan-stats" id="tx_fail">?</div>
+                <legend class="col-form-label col-6 col-md-3 col-lg">Última RX</legend>
+                <div class="col-form-label col-6 col-md-3 col-lg lorawan-stats" id="rx">?</div>
+            </div>
+
+            <div class="form-group row">
+                <legend class="col-form-label col-6 col-md-3 col-lg">TX confirmada:</legend>
+                <div class="col-form-label col-6 col-md-3 col-lg">
+                    <h5>
+                    <span id="lorawan_txconfstatus" class="badge badge-secondary">INACTIVA</span>
+                    </h5>
+                </div>
+                <legend class="col-form-label col-6 col-md-3 col-lg">Inicio TX conf.</legend>
+                <div class="col-form-label col-6 col-md-3 col-lg lorawan-stats" id="confirmtx_start">-</div>
+                <legend class="col-form-label col-6 col-md-3 col-lg"># éxitos TX conf.</legend>
+                <div class="col-form-label col-6 col-md-3 col-lg lorawan-stats" id="num_confirmtx_ok">0</div>
+                <legend class="col-form-label col-6 col-md-3 col-lg"># fallos TX conf.</legend>
+                <div class="col-form-label col-6 col-md-3 col-lg lorawan-stats" id="num_confirmtx_fail">0</div>
             </div>
 
             <div class="form-group">

@@ -69,6 +69,9 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     _lw_needsInit = true;
     _lorahw_init = false;
     _tx_waiting_confirm = false;
+    _ts_confirmTX_start = 0;
+    _num_confirmTX_OK = 0;
+    _num_confirmTX_FAIL = 0;
 
     // Estas claves se asumen pendientes de negociar
     _clearSessionKeys();
@@ -348,7 +351,7 @@ void YuboxLoRaWANConfigClass::_setupHTTPRoutes(AsyncWebServer & srv)
 
 String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
 {
-    DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(5));
+    DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(8));
     switch (lmh_join_status_get()) {
     case LMH_RESET:     json_doc["join"] = "RESET"; break;
     case LMH_SET:       json_doc["join"] = "SET"; break;
@@ -359,6 +362,10 @@ String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
     if (_ts_ultimoTX_FAIL != 0) json_doc["tx_fail"] = _ts_ultimoTX_FAIL; else json_doc["tx_fail"] = (const char *)NULL;
     if (_ts_ultimoRX != 0) json_doc["rx"] = _ts_ultimoRX; else json_doc["rx"] = (const char *)NULL;
     json_doc["ts"] = millis();
+
+    json_doc["num_confirmtx_ok"] = _num_confirmTX_OK;
+    json_doc["num_confirmtx_fail"] = _num_confirmTX_FAIL;
+    if (_tx_waiting_confirm) json_doc["confirmtx_start"] = _ts_confirmTX_start; else json_doc["confirmtx_start"] = (const char *)NULL;
 
     String json_str;
     serializeJson(json_doc, json_str);
@@ -417,6 +424,8 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
     case LMH_FAILED:    json_doc["join"] = "FAILED"; break;
     }
     json_doc["tx_duty_sec"] = getRequestedTXDutyCycle();
+
+    if (_tx_waiting_confirm) json_doc["confirmtx_start"] = _ts_confirmTX_start; else json_doc["confirmtx_start"] = (const char *)NULL;
 
     serializeJson(json_doc, *response);
     request->send(response);
@@ -614,6 +623,9 @@ void YuboxLoRaWANConfigClass::update(void)
     if (_lw_needsInit) {
         _lw_needsInit = false;
         _tx_waiting_confirm = false;
+        _ts_confirmTX_start = 0;
+        _num_confirmTX_OK = 0;
+        _num_confirmTX_FAIL = 0;
 
         // Setup the EUIs and Keys
         lmh_setDevEui(_lw_devEUI);
@@ -644,8 +656,8 @@ void YuboxLoRaWANConfigClass::update(void)
         } else {
             log_i("Starting join LoRaWAN network (region %s subband %d)...",
                 _getLoRaWANRegionName(_lw_region), _lw_subband);
-            _joinstart_handler();
             lmh_join();
+            _joinstart_handler();
         }
     } else {
         // En versión 2.0.0+ el proceso de IRQ se mueve a tarea separada
@@ -653,7 +665,7 @@ void YuboxLoRaWANConfigClass::update(void)
     }
 }
 
-void YuboxLoRaWANConfigClass::_joinstart_handler(void)
+void YuboxLoRaWANConfigClass::_sendActivityEventJSON(void)
 {
     if (_pEvents != NULL && _pEvents->count() > 0) {
         String json_str = _reportActivityJSON();
@@ -661,12 +673,14 @@ void YuboxLoRaWANConfigClass::_joinstart_handler(void)
     }
 }
 
+void YuboxLoRaWANConfigClass::_joinstart_handler(void)
+{
+    _sendActivityEventJSON();
+}
+
 void YuboxLoRaWANConfigClass::_joinfail_handler(void)
 {
-    if (_pEvents != NULL && _pEvents->count() > 0) {
-        String json_str = _reportActivityJSON();
-        _pEvents->send(json_str.c_str());
-    }
+    _sendActivityEventJSON();
 }
 
 bool YuboxLoRaWANConfigClass::isJoined(void)
@@ -722,13 +736,13 @@ bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
         _ts_errorAfterJoin = 0;
         _ts_ultimoTX_OK = millis();
 
-        if (is_txconfirmed) _tx_waiting_confirm = true;
+        if (is_txconfirmed) {
+            _tx_waiting_confirm = true;
+            _ts_confirmTX_start = _ts_ultimoTX_OK;
+        }
     }
 
-    if (_pEvents != NULL && _pEvents->count() > 0) {
-        String json_str = _reportActivityJSON();
-        _pEvents->send(json_str.c_str());
-    }
+    _sendActivityEventJSON();
 
     return (main_err == LMH_SUCCESS);
 }
@@ -955,10 +969,7 @@ void YuboxLoRaWANConfigClass::_join_handler(void)
         LoRaMacMibSetRequestConfirm(&mibReq);
     }
 
-    if (_pEvents != NULL && _pEvents->count() > 0) {
-        String json_str = _reportActivityJSON();
-        _pEvents->send(json_str.c_str());
-    }
+    _sendActivityEventJSON();
 
     for (auto i = 0; i < cbRXList.size(); i++) {
         YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
@@ -986,10 +997,7 @@ void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n)
         }
     }
 
-    if (_pEvents != NULL && _pEvents->count() > 0) {
-        String json_str = _reportActivityJSON();
-        _pEvents->send(json_str.c_str());
-    }
+    _sendActivityEventJSON();
 
     _saveFrameCounters();
 }
@@ -1010,6 +1018,16 @@ void YuboxLoRaWANConfigClass::_txdutychange_handler(void)
 
 void YuboxLoRaWANConfigClass::_tx_confirmed_result(bool r)
 {
+    _tx_waiting_confirm = false;
+    _ts_confirmTX_start = 0;
+    if (r) {
+        _num_confirmTX_OK++;
+    } else {
+        _num_confirmTX_FAIL++;
+    }
+
+    _sendActivityEventJSON();
+
     for (auto i = 0; i < cbRXList.size(); i++) {
         YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
         if (entry.event_type == YBX_LW_TX_CONFIRM && (entry.txc_cb || entry.txc_fcb)) {
@@ -1020,7 +1038,6 @@ void YuboxLoRaWANConfigClass::_tx_confirmed_result(bool r)
             }
         }
     }
-    _tx_waiting_confirm = false;
 }
 
 static void lorawan_confirm_class_handler(DeviceClass_t Class)
