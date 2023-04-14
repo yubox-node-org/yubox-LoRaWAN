@@ -509,6 +509,12 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
     }
 
     if (!clientError) {
+        bool paramIguales = (
+            (0 == memcmp(_lw_devEUI, n_deviceEUI, sizeof(_lw_devEUI))) &&
+            (0 == memcmp(_lw_appEUI, n_appEUI, sizeof(_lw_appEUI))) &&
+            (0 == memcmp(_lw_appKey, n_appKey, sizeof(_lw_appKey))) &&
+            n_region == _lw_region && n_subband == _lw_subband);
+
         memcpy(_lw_devEUI, n_deviceEUI, sizeof(_lw_devEUI));
         memcpy(_lw_appEUI, n_appEUI, sizeof(_lw_appEUI));
         memcpy(_lw_appKey, n_appKey, sizeof(_lw_appKey));
@@ -522,8 +528,13 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
             serverError = true;
             responseMsg = "No se puede guardar intervalo de transmisión deseado";
         } else {
+            if (_lw_confExists && paramIguales) {
+                log_d("Parámetros de red no han cambiado, se omite reinicialización");
+            } else {
+                log_d("Parámetros de red han cambiado, se requiere inicialización");
+                _lw_needsInit = true;
+            }
             _lw_confExists = true;
-            _lw_needsInit = true;
         }
     }
 
