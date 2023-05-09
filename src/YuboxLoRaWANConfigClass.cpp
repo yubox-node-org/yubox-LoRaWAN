@@ -5,6 +5,7 @@
 #include <LoRaWan-Arduino.h>
 #include <SPI.h>
 #include "YuboxLoRaWANConfigClass.h"
+#include <YuboxParamPOST.h>
 
 #include <functional>
 
@@ -448,64 +449,47 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
 
     uint32_t n_tx_duty_sec = getRequestedTXDutyCycle();
 
-    if (!clientError && request->hasParam("region", true)) {
-        p = request->getParam("region", true);
-
-        if (0 >= sscanf(p->value().c_str(), "%hhu", &n_region)) {
-            clientError = true;
-            responseMsg = "ID de región no numérico";
-        } else if (!_isValidLoRaWANRegion(n_region)) {
-            clientError = true;
-            responseMsg = "ID de región no válido o no implementado";
-        }
+    YBX_ASSIGN_NUM_FROM_POST(region, "ID de región", "%hhu", YBX_POST_VAR_NONEMPTY, n_region)
+    if (!clientError && !_isValidLoRaWANRegion(n_region)) {
+        clientError = true;
+        responseMsg = "ID de región no válido o no implementado";
     }
 
-    if (!clientError && request->hasParam("subband", true)) {
-        p = request->getParam("subband", true);
-
-        if (0 >= sscanf(p->value().c_str(), "%hhu", &n_subband)) {
-            clientError = true;
-            responseMsg = "Sub-banda no numérico";
-        } else if (!(n_subband >= 1 && n_subband <= _getMaxLoRaWANRegionSubchannel((LoRaMacRegion_t)n_region))) {
-            clientError = true;
-            responseMsg = "Sub-banda no está en rango requerido para región";
-        }
+    YBX_ASSIGN_NUM_FROM_POST(subband, "Sub-banda", "%hhu", YBX_POST_VAR_NONEMPTY, n_subband)
+    if (!clientError && !(n_subband >= 1 && n_subband <= _getMaxLoRaWANRegionSubchannel((LoRaMacRegion_t)n_region))) {
+        clientError = true;
+        responseMsg = "Sub-banda no está en rango requerido para región";
     }
 
+    String hexParam;
 #define LWPARAM_SCAN(P, R) \
-    if (!clientError && R && !request->hasParam(#P, true)) {\
-        clientError = true;\
-        responseMsg = "EUI no está presente: " #P;\
-    }\
+    hexParam.clear();\
+    clientError = parseParamPOST(clientError, responseMsg, request, \
+        YBX_POST_VAR_TRIM | YBX_POST_VAR_BLANK | ((R) ? (YBX_POST_VAR_REQUIRED|YBX_POST_VAR_NONEMPTY) : 0), \
+        #P, NULL, hexParam);\
     if (!clientError) {\
         memset(n_##P, 0, sizeof(n_##P));\
-        if (request->hasParam(#P, true)) {\
-            p = request->getParam(#P, true);\
-            if (p->value().length() != 2 * sizeof(n_##P)) {\
+        if (!hexParam.isEmpty()) {\
+            if (hexParam.length() != 2 * sizeof(n_##P)) {\
                 clientError = true;\
                 responseMsg = "EUI de longitud incorrecta (" #P "), se esperaba ";\
                 responseMsg += 2 * sizeof(n_##P);\
-            } else if (!_str2bin(p->value().c_str(), n_##P, sizeof(n_##P))) {\
+            } else if (!_str2bin(hexParam.c_str(), n_##P, sizeof(n_##P))) {\
                 clientError = true;\
                 responseMsg = "EUI contiene caracteres no-hexadecimales: " #P;\
             }\
         }\
     }
 
+
     LWPARAM_SCAN(deviceEUI, true)
     LWPARAM_SCAN(appEUI, false)
     LWPARAM_SCAN(appKey, true)
 
-    if (!clientError && request->hasParam("tx_duty_sec", true)) {
-        p = request->getParam("tx_duty_sec", true);
-
-        if (0 >= sscanf(p->value().c_str(), "%lu", &n_tx_duty_sec)) {
-            clientError = true;
-            responseMsg = "Intervalo de transmisión no es numérico";
-        } else if (n_tx_duty_sec < 10) {
-            clientError = true;
-            responseMsg = "Intervalo de transmisión debe ser de al menos 10 segundos";
-        }
+    YBX_ASSIGN_NUM_FROM_POST(tx_duty_sec, "Intervalo de transmisión", "%lu", YBX_POST_VAR_NONEMPTY, n_tx_duty_sec)
+    if (!clientError && n_tx_duty_sec < 10) {
+        clientError = true;
+        responseMsg = "Intervalo de transmisión debe ser de al menos 10 segundos";
     }
 
     if (!clientError) {
@@ -541,18 +525,8 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
     if (!clientError && !serverError) {
         responseMsg = "Parámetros actualizados correctamente";
     }
-    unsigned int httpCode = 200;
-    if (clientError) httpCode = 400;
-    if (serverError) httpCode = 500;
 
-    AsyncResponseStream *response = request->beginResponseStream("application/json");
-    response->setCode(httpCode);
-    DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(2));
-    json_doc["success"] = !(clientError || serverError);
-    json_doc["msg"] = responseMsg.c_str();
-
-    serializeJson(json_doc, *response);
-    request->send(response);
+    YBX_STD_RESPONSE
 }
 
 String YuboxLoRaWANConfigClass::_bin2str(uint8_t * p, size_t n)
