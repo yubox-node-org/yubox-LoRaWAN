@@ -85,10 +85,18 @@ private:
   uint32_t _num_confirmTX_OK;
   uint32_t _num_confirmTX_FAIL;
 
+  // Bandera de si mostrar o no la configuración de transmisión confirmada
+  bool _tx_conf_display;
+
+  // Número de veces que se reintentará la transmisión confirmada luego de fallo
+  uint32_t _tx_conf_num_retries;
+
   void _loadSavedCredentialsFromNVRAM(void);
   bool _saveCredentialsToNVRAM(void);
   void _clearSessionKeys(void);
   void _destroySessionKeys(Preferences &);
+
+  bool _saveConfirmedTXRetries(void);
 
   void _saveFrameCounters(Preferences &);
   void _saveFrameCounters(void);
@@ -113,7 +121,7 @@ private:
   void _txdutychange_handler(void);
 public:
   YuboxLoRaWANConfigClass(void);
-  bool begin(AsyncWebServer & srv);
+  bool begin(AsyncWebServer & srv, bool displayTxConf = false);
 
   // Función a llamar regularmente para procesar eventos de radio
   void update(void);
@@ -153,6 +161,8 @@ public:
 
   // Enviar datos una vez confirmado que hay enlace a red
   bool send(uint8_t * p, uint8_t n, bool is_txconfirmed = false);
+
+  uint32_t getNumTxConfRetries(void) { return _tx_conf_num_retries; }
 
   // NO LLAMAR DESDE CÓDIGO LAS SIGUIENTES FUNCIONES
   void _joinstart_handler(void);

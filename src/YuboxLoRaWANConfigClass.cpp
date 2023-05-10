@@ -74,6 +74,9 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     _num_confirmTX_OK = 0;
     _num_confirmTX_FAIL = 0;
 
+    _tx_conf_num_retries = 3;
+    _tx_conf_display = false;
+
     // Estas claves se asumen pendientes de negociar
     _clearSessionKeys();
 
@@ -179,8 +182,10 @@ const int RADIO_RXEN        = 15;   // LORA ANTENNA RX ENABLE
 #error Undefined LORA pins for target!
 #endif
 
-bool YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv)
+bool YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv, bool displayTxConf)
 {
+    _tx_conf_display = displayTxConf;
+
     _loadSavedCredentialsFromNVRAM();
     _setupHTTPRoutes(srv);
 
@@ -231,6 +236,8 @@ void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
     _lw_region = (LoRaMacRegion_t) nvram.getUChar("region", (uint8_t)LORAMAC_REGION_AU915);
     _lw_subband = nvram.getUChar("subband", 1);
     _tx_duty_sec = nvram.getUInt("txduty", LORAWAN_APP_DEFAULT_TX_DUTYCYCLE);
+
+    _tx_conf_num_retries = nvram.getUInt("txconfretries", 3);
 
     // Validar si región seleccionada es válida...
     if (!_isValidLoRaWANRegion((uint8_t)_lw_region)) _lw_region = LORAMAC_REGION_AU915;
@@ -406,7 +413,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
     YUBOX_RUN_AUTH(request);
 
     AsyncResponseStream *response = request->beginResponseStream("application/json");
-    DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(9));
+    DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(10));
 
     json_doc["region"] = (unsigned int)_lw_region;
     String s_default_devEUI = _bin2str(_lw_default_devEUI, sizeof(_lw_default_devEUI));
@@ -426,7 +433,13 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
     }
     json_doc["tx_duty_sec"] = getRequestedTXDutyCycle();
 
-    if (_tx_waiting_confirm) json_doc["confirmtx_start"] = _ts_confirmTX_start; else json_doc["confirmtx_start"] = (const char *)NULL;
+    if (_tx_waiting_confirm)
+        json_doc["confirmtx_start"] = _ts_confirmTX_start;
+    else json_doc["confirmtx_start"] = (const char *)NULL;
+
+    if (_tx_conf_display)
+        json_doc["txconf_retries"] = _tx_conf_num_retries;
+    else json_doc["txconf_retries"] = (const char *)NULL;
 
     serializeJson(json_doc, *response);
     request->send(response);
@@ -448,6 +461,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
     uint8_t n_appKey[16];
 
     uint32_t n_tx_duty_sec = getRequestedTXDutyCycle();
+    uint32_t n_tx_conf_num_retries = _tx_conf_num_retries;
 
     YBX_ASSIGN_NUM_FROM_POST(region, "ID de región", "%hhu", YBX_POST_VAR_NONEMPTY, n_region)
     if (!clientError && !_isValidLoRaWANRegion(n_region)) {
@@ -492,6 +506,14 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
         responseMsg = "Intervalo de transmisión debe ser de al menos 10 segundos";
     }
 
+    if (_tx_conf_display) {
+        YBX_ASSIGN_NUM_FROM_POST(txconf_retries, "Reintentos de transmisión confirmada", "%lu", YBX_POST_VAR_NONEMPTY, n_tx_conf_num_retries)
+        if (!clientError && n_tx_conf_num_retries < 1) {
+            clientError = true;
+            responseMsg = "Número de reintentos de transmisión confirmada debe ser mayor a 0";
+        }
+    }
+
     if (!clientError) {
         bool paramIguales = (
             (0 == memcmp(_lw_devEUI, n_deviceEUI, sizeof(_lw_devEUI))) &&
@@ -505,12 +527,17 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
         _lw_region = (LoRaMacRegion_t)n_region;
         _lw_subband = n_subband;
 
+        _tx_conf_num_retries = n_tx_conf_num_retries;
+
         serverError = !_saveCredentialsToNVRAM();
         if (serverError) {
             responseMsg = "No se pueden guardar valores LoRaWAN";
         } else if (!setRequestedTXDutyCycle(n_tx_duty_sec)) {
             serverError = true;
             responseMsg = "No se puede guardar intervalo de transmisión deseado";
+        } else if (!_saveConfirmedTXRetries()) {
+            serverError = true;
+            responseMsg = "No se puede guardar reintentos de transmisión confirmada";
         } else {
             if (_lw_confExists && paramIguales) {
                 log_d("Parámetros de red no han cambiado, se omite reinicialización");
@@ -574,6 +601,20 @@ bool YuboxLoRaWANConfigClass::_saveCredentialsToNVRAM(void)
 
     // Cuando se guardan nuevas claves, se debe asumir que las claves de sesión se invalidan
     _destroySessionKeys(nvram);
+
+    nvram.end();
+    return ok;
+}
+
+bool YuboxLoRaWANConfigClass::_saveConfirmedTXRetries(void)
+{
+    bool ok = true;
+    Preferences nvram;
+    nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+
+    if (_tx_conf_display) {
+        if (ok && !nvram.putUInt("txconfretries", _tx_conf_num_retries)) ok = false;
+    }
 
     nvram.end();
     return ok;

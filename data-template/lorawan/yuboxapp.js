@@ -104,8 +104,11 @@ function setupLoRaWANTab()
                 ['input#deviceEUI',         lorawan_formatEUI((data.deviceEUI == undefined) ? data.deviceEUI_ESP32 : data.deviceEUI)],
                 ['input#appEUI',            (data.appEUI == undefined) ? '' : lorawan_formatEUI(data.appEUI)],
                 ['input#appKey',            (data.appKey == undefined) ? '' : lorawan_formatEUI(data.appKey)],
-                ['input#tx_duty_sec',       data.tx_duty_sec]
+                ['input#tx_duty_sec',       data.tx_duty_sec],
+                ['input#txconf_retries',    (data.txconf_retries != null) ? '' : '3' ],
             ].forEach(t => pane.querySelector(t[0]).value = t[1]);
+
+            pane.querySelector('div.txconfretries').style = (data.txconf_retries == null) ? 'display: none;' : '';
 
             sel_region.dispatchEvent(new Event('change'));
         }, (e) => { yuboxStdAjaxFailHandler(e); });
@@ -167,7 +170,8 @@ function setupLoRaWANTab()
             subband:    pane.querySelector('input#subband').value,
             deviceEUI:  lorawan_unformatEUI(pane.querySelector('input#deviceEUI').value),
             appKey:     lorawan_unformatEUI(pane.querySelector('input#appKey').value),
-            tx_duty_sec: pane.querySelector('input#tx_duty_sec').value
+            tx_duty_sec: pane.querySelector('input#tx_duty_sec').value,
+            txconf_retries: pane.querySelector('input#txconf_retries').value,
         };
         let appeui = lorawan_unformatEUI(pane.querySelector('input#appEUI').value);
         if (appeui != '') postData.appEUI = appeui;

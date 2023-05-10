@@ -144,6 +144,18 @@
                 </datalist>
             </div>
 
+            <div class="form-group txconfretries" style="display: none;">
+                <label for="txconf_retries">Reintentos de transmisión confirmada:</label>
+                <input type="number" id="txconf_retries" name="txconf_retries" class="form-control" min="1"
+                    placeholder="3" aria-describedby="txconf_retries_help" value="" />
+                <small id="txconf_retries_help" class="form-text text-muted">Número de veces que el dispositivo intentará
+                    volver a transmitir una muestra vía transmisión confirmada (con respuesta del gateway) antes de DESECHAR
+                    la muestra e intentar con la siguiente. Un valor muy alto puede conducir a un encolamiento incontrolado
+                    de muestras pendientes de transmitir, especialmente si el el dispositivo no puede escuchar la confirmación
+                    del gateway.
+                </small>
+            </div>
+
             <button type="button" class="btn btn-primary" name="apply">Actualizar</button>
         </form>
     </div>
