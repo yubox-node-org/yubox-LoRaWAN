@@ -529,7 +529,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
 
         _tx_conf_num_retries = n_tx_conf_num_retries;
 
-        serverError = !_saveCredentialsToNVRAM();
+        if (!paramIguales) serverError = !_saveCredentialsToNVRAM();
         if (serverError) {
             responseMsg = "No se pueden guardar valores LoRaWAN";
         } else if (!setRequestedTXDutyCycle(n_tx_duty_sec)) {
