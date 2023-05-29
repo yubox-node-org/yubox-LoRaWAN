@@ -105,7 +105,7 @@ function setupLoRaWANTab()
                 ['input#appEUI',            (data.appEUI == undefined) ? '' : lorawan_formatEUI(data.appEUI)],
                 ['input#appKey',            (data.appKey == undefined) ? '' : lorawan_formatEUI(data.appKey)],
                 ['input#tx_duty_sec',       data.tx_duty_sec],
-                ['input#txconf_retries',    (data.txconf_retries != null) ? '' : '3' ],
+                ['input#txconf_retries',    (data.txconf_retries != null) ? data.txconf_retries : '3' ],
             ].forEach(t => pane.querySelector(t[0]).value = t[1]);
 
             pane.querySelector('div.txconfretries').style = (data.txconf_retries == null) ? 'display: none;' : '';
