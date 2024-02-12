@@ -1,7 +1,5 @@
 build/
 data/
-*.ino.nodemcu-32s.bin
-*.ino.node32s.bin
-*.ino.esp32wrover.bin
+*.ino.*.bin
 *.tar.gz
 
