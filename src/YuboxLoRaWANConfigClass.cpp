@@ -359,7 +359,11 @@ void YuboxLoRaWANConfigClass::_setupHTTPRoutes(AsyncWebServer & srv)
 
 String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
 {
+#if ARDUINOJSON_VERSION_MAJOR <= 6
     DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(8));
+#else
+    JsonDocument json_doc;
+#endif
     switch (lmh_join_status_get()) {
     case LMH_RESET:     json_doc["join"] = "RESET"; break;
     case LMH_SET:       json_doc["join"] = "SET"; break;
@@ -395,10 +399,19 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanregionsjson_GET(Asyn
     while (_isValidLoRaWANRegion(numRegions)) numRegions++;
 
     AsyncResponseStream *response = request->beginResponseStream("application/json");
+#if ARDUINOJSON_VERSION_MAJOR <= 6
     DynamicJsonDocument json_doc(JSON_ARRAY_SIZE(numRegions) + numRegions * JSON_OBJECT_SIZE(3));
+#else
+    JsonDocument json_doc;
+#endif
 
     for (auto i = 0; i < numRegions; i++) {
-        JsonObject region = json_doc.createNestedObject();
+        JsonObject region =
+#if ARDUINOJSON_VERSION_MAJOR <= 6
+            json_doc.createNestedObject();
+#else
+            json_doc.add<JsonObject>();
+#endif
         region["id"] = i;
         region["name"] = _getLoRaWANRegionName((LoRaMacRegion_t)i);
         region["max_sb"] = _getMaxLoRaWANRegionSubchannel((LoRaMacRegion_t)i);
@@ -413,7 +426,11 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
     YUBOX_RUN_AUTH(request);
 
     AsyncResponseStream *response = request->beginResponseStream("application/json");
+#if ARDUINOJSON_VERSION_MAJOR <= 6
     DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(10));
+#else
+    JsonDocument json_doc;
+#endif
 
     json_doc["region"] = (unsigned int)_lw_region;
     String s_default_devEUI = _bin2str(_lw_default_devEUI, sizeof(_lw_default_devEUI));

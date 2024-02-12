@@ -174,7 +174,11 @@ void lorawan_payload(AsyncWebServerRequest * request)
 
     AsyncResponseStream *response = request->beginResponseStream("application/json");
     response->setCode(httpCode);
+#if ARDUINOJSON_VERSION_MAJOR <= 6
     DynamicJsonDocument json_doc(JSON_OBJECT_SIZE(2));
+#else
+    JsonDocument json_doc;
+#endif
     json_doc["success"] = !(clientError || serverError);
     json_doc["msg"] = responseMsg.c_str();
 
