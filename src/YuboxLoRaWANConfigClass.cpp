@@ -154,6 +154,23 @@ void YuboxLoRaWANConfigClass::_saveFrameCounters(void)
     _saveFrameCounters(nvram);
 }
 
+#ifdef YUBOX_HELTEC_WIFI_LORA_V3
+
+// Pines para controlar el Heltec Wifi LoRa v3 basado en ESP32-S3
+
+const int PIN_LORA_NSS      =  8;   // LORA SPI CS
+const int PIN_LORA_SCLK     =  9;   // LORA SPI CLK
+const int PIN_LORA_MISO     = 11;   // LORA SPI MISO
+const int PIN_LORA_MOSI     = 10;   // LORA SPI MOSI
+
+const int PIN_LORA_RESET    = 12;   // LORA RESET
+const int PIN_LORA_BUSY     = 13;   // LORA SPI BUSY
+const int PIN_LORA_DIO_1    = 14;   // LORA DIO_1
+const int RADIO_TXEN        = -1;   // LORA ANTENNA TX ENABLE
+const int RADIO_RXEN        = -1;   // LORA ANTENNA RX ENABLE
+
+#else
+
 // ESP32 - SX126x pin configuration
 const int PIN_LORA_NSS      = SS;   // LORA SPI CS
 const int PIN_LORA_SCLK     = SCK;  // LORA SPI CLK
@@ -180,6 +197,8 @@ const int RADIO_TXEN        = 16;   // LORA ANTENNA TX ENABLE
 const int RADIO_RXEN        = 15;   // LORA ANTENNA RX ENABLE
 #else
 #error Undefined LORA pins for target!
+#endif
+
 #endif
 
 bool YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv, bool displayTxConf)
