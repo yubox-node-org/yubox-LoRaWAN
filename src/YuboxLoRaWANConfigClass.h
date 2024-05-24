@@ -13,13 +13,9 @@
 
 #include <functional>
 
-typedef void (*YuboxLoRaWAN_join_cb)(void);
 typedef std::function<void (void) > YuboxLoRaWAN_join_func_cb;
-typedef void (*YuboxLoRaWAN_rx_cb)(uint8_t *, uint8_t);
 typedef std::function<void (uint8_t *, uint8_t) > YuboxLoRaWAN_rx_func_cb;
-typedef void (*YuboxLoRaWAN_txdutychange_cb)(void);
 typedef std::function<void (void) > YuboxLoRaWAN_txdutychange_func_cb;
-typedef void (*YuboxLoRaWAN_txconfirm_cb)(bool);
 typedef std::function<void (bool) > YuboxLoRaWAN_txconfirm_func_cb;
 
 typedef size_t yuboxlorawan_event_id_t;
@@ -133,27 +129,19 @@ public:
   bool isWaitingConfirmation(void) { return _tx_waiting_confirm; }
 
   // Instalar callback para aviso de unión exitosa a LoRaWAN
-  yuboxlorawan_event_id_t onJoin(YuboxLoRaWAN_join_cb cbRX);
   yuboxlorawan_event_id_t onJoin(YuboxLoRaWAN_join_func_cb cbRX);
-  void removeJoin(YuboxLoRaWAN_join_cb cbRX);
   void removeJoin(yuboxlorawan_event_id_t id);
 
   // Instalar callback para recepción de datos LoRaWAN
-  yuboxlorawan_event_id_t onRX(YuboxLoRaWAN_rx_cb cbRX);
   yuboxlorawan_event_id_t onRX(YuboxLoRaWAN_rx_func_cb cbRX);
-  void removeRX(YuboxLoRaWAN_rx_cb cbRX);
   void removeRX(yuboxlorawan_event_id_t id);
 
   // Instalar callback para cambio de duración de TX DUTY requerido
-  yuboxlorawan_event_id_t onTXDuty(YuboxLoRaWAN_txdutychange_cb cb);
   yuboxlorawan_event_id_t onTXDuty(YuboxLoRaWAN_txdutychange_func_cb cb);
-  void removeTXDuty(YuboxLoRaWAN_txdutychange_cb cb);
   void removeTXDuty(yuboxlorawan_event_id_t id);
 
   // Instalar callback para confirmación de éxito o fallo de TX confirmado
-  yuboxlorawan_event_id_t onTXConfirm(YuboxLoRaWAN_txconfirm_cb cb);
   yuboxlorawan_event_id_t onTXConfirm(YuboxLoRaWAN_txconfirm_func_cb cb);
-  void removeTXConfirm(YuboxLoRaWAN_txconfirm_cb cb);
   void removeTXConfirm(yuboxlorawan_event_id_t cb);
 
   uint32_t getRequestedTXDutyCycle(void) { return _tx_duty_sec; }

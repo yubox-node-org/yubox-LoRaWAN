@@ -35,16 +35,12 @@ typedef struct YuboxLoRaWAN_rx_List
   yuboxlorawan_event_t event_type;
   yuboxlorawan_event_id_t id;
 
-  YuboxLoRaWAN_join_cb j_cb;
   YuboxLoRaWAN_join_func_cb j_fcb;
-  YuboxLoRaWAN_rx_cb rx_cb;
   YuboxLoRaWAN_rx_func_cb rx_fcb;
-  YuboxLoRaWAN_txdutychange_cb txd_cb;
   YuboxLoRaWAN_txdutychange_func_cb txd_fcb;
-  YuboxLoRaWAN_txconfirm_cb txc_cb;
   YuboxLoRaWAN_txconfirm_func_cb txc_fcb;
 
-  YuboxLoRaWAN_rx_List() : event_type(YBX_LW_EVENT_MAX), id(current_id++), j_cb(NULL), j_fcb(NULL), rx_cb(NULL), rx_fcb(NULL), txd_cb(NULL), txd_fcb(NULL), txc_cb(NULL), txc_fcb(NULL) {}
+  YuboxLoRaWAN_rx_List() : event_type(YBX_LW_EVENT_MAX), id(current_id++), j_fcb(NULL), rx_fcb(NULL), txd_fcb(NULL), txc_fcb(NULL) {}
 } YuboxLoRaWAN_rx_List_t;
 yuboxlorawan_event_id_t YuboxLoRaWAN_rx_List::current_id = 1;
 
@@ -809,38 +805,16 @@ bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
     return (main_err == LMH_SUCCESS);
 }
 
-yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onJoin(YuboxLoRaWAN_join_cb cbJ)
-{
-  if (!cbJ) return 0;
-
-  YuboxLoRaWAN_rx_List_t n_evHandler;
-  n_evHandler.event_type = YBX_LW_NETJOIN;
-  n_evHandler.j_cb = cbJ;
-  n_evHandler.j_fcb = NULL;
-  cbRXList.push_back(n_evHandler);
-  return n_evHandler.id;
-}
-
 yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onJoin(YuboxLoRaWAN_join_func_cb cbJ)
 {
   if (!cbJ) return 0;
 
   YuboxLoRaWAN_rx_List_t n_evHandler;
   n_evHandler.event_type = YBX_LW_NETJOIN;
-  n_evHandler.j_cb = NULL;
+  //n_evHandler.j_cb = NULL;
   n_evHandler.j_fcb = cbJ;
   cbRXList.push_back(n_evHandler);
   return n_evHandler.id;
-}
-
-void YuboxLoRaWANConfigClass::removeJoin(YuboxLoRaWAN_join_cb cbJ)
-{
-  if (!cbJ) return;
-
-  for (auto i = 0; i < cbRXList.size(); i++) {
-    YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-    if (entry.event_type == YBX_LW_NETJOIN && entry.j_cb == cbJ) cbRXList.erase(cbRXList.begin() + i);
-  }
 }
 
 void YuboxLoRaWANConfigClass::removeJoin(yuboxlorawan_event_id_t id)
@@ -851,38 +825,16 @@ void YuboxLoRaWANConfigClass::removeJoin(yuboxlorawan_event_id_t id)
   }
 }
 
-yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onRX(YuboxLoRaWAN_rx_cb cbRX)
-{
-  if (!cbRX) return 0;
-
-  YuboxLoRaWAN_rx_List_t n_evHandler;
-  n_evHandler.event_type = YBX_LW_RX;
-  n_evHandler.rx_cb = cbRX;
-  n_evHandler.rx_fcb = NULL;
-  cbRXList.push_back(n_evHandler);
-  return n_evHandler.id;
-}
-
 yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onRX(YuboxLoRaWAN_rx_func_cb cbRX)
 {
   if (!cbRX) return 0;
 
   YuboxLoRaWAN_rx_List_t n_evHandler;
   n_evHandler.event_type = YBX_LW_RX;
-  n_evHandler.rx_cb = NULL;
+  //n_evHandler.rx_cb = NULL;
   n_evHandler.rx_fcb = cbRX;
   cbRXList.push_back(n_evHandler);
   return n_evHandler.id;
-}
-
-void YuboxLoRaWANConfigClass::removeRX(YuboxLoRaWAN_rx_cb cbRX)
-{
-  if (!cbRX) return;
-
-  for (auto i = 0; i < cbRXList.size(); i++) {
-    YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-    if (entry.event_type == YBX_LW_RX && entry.rx_cb == cbRX) cbRXList.erase(cbRXList.begin() + i);
-  }
 }
 
 void YuboxLoRaWANConfigClass::removeRX(yuboxlorawan_event_id_t id)
@@ -893,38 +845,16 @@ void YuboxLoRaWANConfigClass::removeRX(yuboxlorawan_event_id_t id)
   }
 }
 
-yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onTXDuty(YuboxLoRaWAN_txdutychange_cb cb)
-{
-  if (!cb) return 0;
-
-  YuboxLoRaWAN_rx_List_t n_evHandler;
-  n_evHandler.event_type = YBX_LW_TXDUTY_CHANGE;
-  n_evHandler.txd_cb = cb;
-  n_evHandler.txd_fcb = NULL;
-  cbRXList.push_back(n_evHandler);
-  return n_evHandler.id;
-}
-
 yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onTXDuty(YuboxLoRaWAN_txdutychange_func_cb cb)
 {
   if (!cb) return 0;
 
   YuboxLoRaWAN_rx_List_t n_evHandler;
   n_evHandler.event_type = YBX_LW_TXDUTY_CHANGE;
-  n_evHandler.txd_cb = NULL;
+  //n_evHandler.txd_cb = NULL;
   n_evHandler.txd_fcb = cb;
   cbRXList.push_back(n_evHandler);
   return n_evHandler.id;
-}
-
-void YuboxLoRaWANConfigClass::removeTXDuty(YuboxLoRaWAN_txdutychange_cb cb)
-{
-  if (!cb) return;
-
-  for (auto i = 0; i < cbRXList.size(); i++) {
-    YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-    if (entry.event_type == YBX_LW_TXDUTY_CHANGE && entry.txd_cb == cb) cbRXList.erase(cbRXList.begin() + i);
-  }
 }
 
 void YuboxLoRaWANConfigClass::removeTXDuty(yuboxlorawan_event_id_t id)
@@ -935,38 +865,16 @@ void YuboxLoRaWANConfigClass::removeTXDuty(yuboxlorawan_event_id_t id)
   }
 }
 
-yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onTXConfirm(YuboxLoRaWAN_txconfirm_cb cb)
-{
-  if (!cb) return 0;
-
-  YuboxLoRaWAN_rx_List_t n_evHandler;
-  n_evHandler.event_type = YBX_LW_TX_CONFIRM;
-  n_evHandler.txc_cb = cb;
-  n_evHandler.txc_fcb = NULL;
-  cbRXList.push_back(n_evHandler);
-  return n_evHandler.id;
-}
-
 yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onTXConfirm(YuboxLoRaWAN_txconfirm_func_cb cb)
 {
   if (!cb) return 0;
 
   YuboxLoRaWAN_rx_List_t n_evHandler;
   n_evHandler.event_type = YBX_LW_TX_CONFIRM;
-  n_evHandler.txc_cb = NULL;
+  //n_evHandler.txc_cb = NULL;
   n_evHandler.txc_fcb = cb;
   cbRXList.push_back(n_evHandler);
   return n_evHandler.id;
-}
-
-void YuboxLoRaWANConfigClass::removeTXConfirm(YuboxLoRaWAN_txconfirm_cb cb)
-{
-  if (!cb) return;
-
-  for (auto i = 0; i < cbRXList.size(); i++) {
-    YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-    if (entry.event_type == YBX_LW_TX_CONFIRM && entry.txc_cb == cb) cbRXList.erase(cbRXList.begin() + i);
-  }
 }
 
 void YuboxLoRaWANConfigClass::removeTXConfirm(yuboxlorawan_event_id_t id)
@@ -1035,12 +943,8 @@ void YuboxLoRaWANConfigClass::_join_handler(void)
 
     for (auto i = 0; i < cbRXList.size(); i++) {
         YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-        if (entry.event_type == YBX_LW_NETJOIN && (entry.j_cb || entry.j_fcb)) {
-            if (entry.j_cb) {
-                entry.j_cb();
-            } else if (entry.j_fcb) {
-                entry.j_fcb();
-            }
+        if (entry.event_type == YBX_LW_NETJOIN) {
+            entry.j_fcb();
         }
     }
 }
@@ -1050,12 +954,8 @@ void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n)
     _ts_ultimoRX = millis();
     for (auto i = 0; i < cbRXList.size(); i++) {
         YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-        if (entry.event_type == YBX_LW_RX && (entry.rx_cb || entry.rx_fcb)) {
-            if (entry.rx_cb) {
-                entry.rx_cb(p, n);
-            } else if (entry.rx_fcb) {
-                entry.rx_fcb(p, n);
-            }
+        if (entry.event_type == YBX_LW_RX) {
+            entry.rx_fcb(p, n);
         }
     }
 
@@ -1068,12 +968,8 @@ void YuboxLoRaWANConfigClass::_txdutychange_handler(void)
 {
     for (auto i = 0; i < cbRXList.size(); i++) {
         YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-        if (entry.event_type == YBX_LW_TXDUTY_CHANGE && (entry.txd_cb || entry.txd_fcb)) {
-            if (entry.txd_cb) {
-                entry.txd_cb();
-            } else if (entry.txd_fcb) {
-                entry.txd_fcb();
-            }
+        if (entry.event_type == YBX_LW_TXDUTY_CHANGE) {
+            entry.txd_fcb();
         }
     }
 }
@@ -1092,12 +988,8 @@ void YuboxLoRaWANConfigClass::_tx_confirmed_result(bool r)
 
     for (auto i = 0; i < cbRXList.size(); i++) {
         YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-        if (entry.event_type == YBX_LW_TX_CONFIRM && (entry.txc_cb || entry.txc_fcb)) {
-            if (entry.txc_cb) {
-                entry.txc_cb(r);
-            } else if (entry.txc_fcb) {
-                entry.txc_fcb(r);
-            }
+        if (entry.event_type == YBX_LW_TX_CONFIRM) {
+            entry.txc_fcb(r);
         }
     }
 }
