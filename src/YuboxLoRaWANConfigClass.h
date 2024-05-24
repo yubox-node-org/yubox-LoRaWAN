@@ -110,6 +110,7 @@ private:
   void _routeHandler_yuboxAPI_lorawanconfigjson_GET(AsyncWebServerRequest *);
   void _routeHandler_yuboxAPI_lorawanconfigjson_POST(AsyncWebServerRequest *);
   void _routeHandler_yuboxAPI_lorawanregionsjson_GET(AsyncWebServerRequest *);
+  void _routeHandler_yuboxAPI_lorawanresetconn_POST(AsyncWebServerRequest *);
 
   String _bin2str(uint8_t *, size_t);
   bool _str2bin(const char *, uint8_t *, size_t);

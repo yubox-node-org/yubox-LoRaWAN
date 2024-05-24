@@ -185,6 +185,21 @@ function setupLoRaWANTab()
             }
         }, e => yuboxStdAjaxFailHandler(e));
     });
+
+    pane.querySelector('button[name=resetconn]').addEventListener('click', function () {
+        if (!confirm('Confirme que se debe desechar las credenciales recibidas y volver a empezar la negociación OTAA')) return;
+
+        let postData = {};
+        yuboxFetch('lorawan', 'resetconn', postData)
+        .then((r) => {
+            if (r.success) {
+                // Recargar los datos recién guardados del dispositivo
+                yuboxMostrarAlertText('success', r.msg, 3000);
+            } else {
+                yuboxMostrarAlertText('danger', r.msg);
+            }
+        }, e => yuboxStdAjaxFailHandler(e));
+    });
 }
 
 function lorawan_format_tsactivity(t, ts_now)

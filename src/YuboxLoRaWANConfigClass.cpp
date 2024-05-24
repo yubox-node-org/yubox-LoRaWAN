@@ -370,6 +370,7 @@ void YuboxLoRaWANConfigClass::_setupHTTPRoutes(AsyncWebServer & srv)
   srv.addHandler(_pEvents);
   _pEvents->onConnect(std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawan_status_onConnect, this, std::placeholders::_1));
   srv.on("/yubox-api/lorawan/regions.json", HTTP_GET, std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanregionsjson_GET, this, std::placeholders::_1));
+  srv.on("/yubox-api/lorawan/resetconn", HTTP_POST, std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanresetconn_POST, this, std::placeholders::_1));
 }
 
 String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
@@ -584,6 +585,31 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
     if (!clientError && !serverError) {
         responseMsg = "Parámetros actualizados correctamente";
     }
+
+    YBX_STD_RESPONSE
+}
+
+void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanresetconn_POST(AsyncWebServerRequest * request)
+{
+   YUBOX_RUN_AUTH(request);
+
+    bool clientError = false;
+    bool serverError = false;
+    String responseMsg = "";
+
+    log_w("Se desechan credenciales negociadas, se volverá a intentar OTAA para negociación LoRaWAN...");
+    _ts_errorAfterJoin = 0;
+    _lw_needsInit = true;
+
+    // Destruir cualquier clave de sesión, porque debe volverse a negociar OTAA
+    if (!_lw_useOTAA) {
+        Preferences nvram;
+        nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+
+        _destroySessionKeys(nvram);
+    }
+
+    responseMsg = "Se desechan credenciales LoRaWAN y se reinicia negociación OTAA";
 
     YBX_STD_RESPONSE
 }
