@@ -100,6 +100,7 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     _ts_ultimoTX_OK = 0;
     _ts_ultimoTX_FAIL = 0;
     _ts_ultimoRX = 0;
+    _ts_lastDownlinkActivity = 0;
     _tx_duty_sec = LORAWAN_APP_DEFAULT_TX_DUTYCYCLE;
     _tx_duty_sec_changed = false;
 }
@@ -122,6 +123,15 @@ void YuboxLoRaWANConfigClass::_destroySessionKeys(Preferences & nvram)
     nvram.remove("devaddr");
     nvram.remove("uplinkcnt");
     nvram.remove("downlinkcnt");
+}
+
+void YuboxLoRaWANConfigClass::destroySessionKeys(void)
+{
+    Preferences nvram;
+    nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+
+    _destroySessionKeys(nvram);
+    _lw_needsInit = true;
 }
 
 void YuboxLoRaWANConfigClass::_saveFrameCounters(Preferences & nvram)
@@ -602,12 +612,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanresetconn_POST(Async
     _lw_needsInit = true;
 
     // Destruir cualquier clave de sesión, porque debe volverse a negociar OTAA
-    if (!_lw_useOTAA) {
-        Preferences nvram;
-        nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
-
-        _destroySessionKeys(nvram);
-    }
+    if (!_lw_useOTAA) destroySessionKeys();
 
     responseMsg = "Se desechan credenciales LoRaWAN y se reinicia negociación OTAA";
 
@@ -710,6 +715,7 @@ void YuboxLoRaWANConfigClass::update(void)
         _ts_confirmTX_start = 0;
         _num_confirmTX_OK = 0;
         _num_confirmTX_FAIL = 0;
+        _ts_lastDownlinkActivity = 0;
 
         // Setup the EUIs and Keys
         lmh_setDevEui(_lw_devEUI);
@@ -797,12 +803,7 @@ bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
             _lw_needsInit = true;
 
             // Destruir cualquier clave de sesión, porque debe volverse a negociar OTAA
-            if (!_lw_useOTAA) {
-                Preferences nvram;
-                nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
-
-                _destroySessionKeys(nvram);
-            }
+            if (!_lw_useOTAA) destroySessionKeys();
         } else if (p != NULL) {
             /**
              * NOTA: por Alex Villacís Lasso 2020/11/24
@@ -949,6 +950,7 @@ void YuboxLoRaWANConfigClass::_join_handler(void)
         if (!ok) _destroySessionKeys(nvram);
 
         if (ok) log_d("Claves de sesión negociadas por OTAA fueron guardadas");
+        _ts_lastDownlinkActivity = millis();
     } else {
         MibRequestConfirm_t mibReq;
 
@@ -978,6 +980,7 @@ void YuboxLoRaWANConfigClass::_join_handler(void)
 void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n)
 {
     _ts_ultimoRX = millis();
+    _ts_lastDownlinkActivity = _ts_ultimoRX;
     for (auto i = 0; i < cbRXList.size(); i++) {
         YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
         if (entry.event_type == YBX_LW_RX) {
@@ -1005,6 +1008,7 @@ void YuboxLoRaWANConfigClass::_tx_confirmed_result(bool r)
     _tx_waiting_confirm = false;
     _ts_confirmTX_start = 0;
     if (r) {
+        _ts_lastDownlinkActivity = millis();
         _num_confirmTX_OK++;
     } else {
         _num_confirmTX_FAIL++;

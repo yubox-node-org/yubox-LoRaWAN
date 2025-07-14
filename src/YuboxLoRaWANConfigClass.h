@@ -68,6 +68,7 @@ private:
   uint32_t _ts_ultimoTX_OK;
   uint32_t _ts_ultimoTX_FAIL;
   uint32_t _ts_ultimoRX;
+  uint32_t _ts_lastDownlinkActivity;
 
   // Intervalo en segundos de TX DUTY configurado para aplicación. Es responsabilidad
   // de la aplicación instalar un callback o de otra forma recoger el valor, y
@@ -129,6 +130,9 @@ public:
   // Verificar si se está todavía esperando la confirmación de una transmisión confirmada
   bool isWaitingConfirmation(void) { return _tx_waiting_confirm; }
 
+  // Destruir las claves de sesión y volver a empezar el join
+  void destroySessionKeys(void);
+
   // Instalar callback para aviso de unión exitosa a LoRaWAN
   yuboxlorawan_event_id_t onJoin(YuboxLoRaWAN_join_func_cb cbRX);
   void removeJoin(yuboxlorawan_event_id_t id);
@@ -152,6 +156,8 @@ public:
   bool send(uint8_t * p, uint8_t n, bool is_txconfirmed = false);
 
   uint32_t getNumTxConfRetries(void) { return _tx_conf_num_retries; }
+
+  uint32_t getLastDownlinkActivity(void) { return _ts_lastDownlinkActivity; }
 
   // NO LLAMAR DESDE CÓDIGO LAS SIGUIENTES FUNCIONES
   void _joinstart_handler(void);
