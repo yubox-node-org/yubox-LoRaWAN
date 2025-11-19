@@ -1,0 +1,43 @@
+Claves NVM usadas para preferencias no-volátiles
+Actualizado al 2025/11/19
+
+Se lista en primer nivel el key del grupo para uso en Preferences.begin()
+y en segundo nivel el key del item, su tipo de dato y su propósito.
+
+El tipo bool se representa internamente como 1 byte, valores 1 o 0 para ACTIVO
+o INACTIVO, respectivamente.
+
+El tipo uint8_t[N] representa un blob binario de exactamente N bytes de longitud
+que no corresponde a una cadena de texto ASCII, y en particular NO debe guardarse
+ni interpretarse con \0 como byte de fin de cadena.
+
+YUBOX/LoRaWAN
+    devEUI          uint8_t[8]  Identificador de Device EUI de LoRaWAN. En la configuración inicial
+                                este identificador debe guardarse para considerar que la configuración
+                                es válida. Por omisión se guarda a un valor basado en la MAC del
+                                dispositivo, rellenado con ceros al final.
+    appEUI          uint8_t[8]  Identificador de Application EUI de LoRaWAN. Si la red LoRaWAN remota
+                                no hace uso de este valor, se debe rellenar con ceros. Este valor debe
+                                existir para que la configuración sea válida.
+    appKey          uint8_t[16] Valor de Application Key que sirve de contraseña para negociación OTAA.
+                                Este valor debe existir para que la configuración sea válida.
+    region          uint8_t     Número que identifica a la región LoRaWAN. Si el valor no está definido,
+                                o si no es válido, se asume región AU915 que corresponde al valor 0x01.
+                                (definido en enum LoRaMacRegion_t en SX126x-Arduino/src/mac/LoRaMac.h)
+    subband         uint8_t     Sub-banda inicial para establecer comunicación OTAA. El rango de subbandas
+                                depende del soporte de subbandas de la región específica LoRaWAN. Por
+                                omisión se asume subbanda 1.
+    txduty          uint32_t    Intervalo (en segundos) entre transmisiones sucesivas de paquetes LoRaWAN.
+                                Por omisión, y el valor mínimo posible, 10 segundos.
+    txconfretries   uint32_t    Número de reintentos de transmisión confirmada. Este número de reintentos
+                                se aplican encima de los reintentos internos de la biblioteca LoRaWAN.
+                                Por omisión 3 reintentos. Sólo aplica para transmisiones confirmadas.
+
+Las siguientes 5 claves están en el namespace YUBOX/LoRaWAN pero NO DEBEN ASIGNARSE externamente porque
+sirven para mantener el estado de sesión LoRaWAN luego de negociar usando OTAA. En flasheo de preparación
+estas variables deben NO EXISTIR.
+    NwkSKey         uint8_t[16] (interno) Caché de Network Session Key.
+    AppSKey         uint8_t[16] (interno) Cache de Application Session Key.
+    devaddr         uint32_t    (interno) Cache de Device Address.
+    uplinkcnt       uint32_t    (interno) Caché de contador de paquetes uplink.
+    downlinkcnt     uint32_t    (interno) Caché de contador de paquetes downlink.
