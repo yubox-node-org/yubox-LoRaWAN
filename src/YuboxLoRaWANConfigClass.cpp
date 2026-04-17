@@ -101,7 +101,8 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     _ts_ultimoTX_FAIL = 0;
     _ts_ultimoRX = 0;
     _ts_lastDownlinkActivity = 0;
-    _tx_duty_sec = LORAWAN_APP_DEFAULT_TX_DUTYCYCLE;
+    _tx_default_duty_sec = LORAWAN_APP_DEFAULT_TX_DUTYCYCLE;
+    _tx_duty_sec = _tx_default_duty_sec;
     _tx_duty_sec_changed = false;
 }
 
@@ -260,7 +261,7 @@ void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
     LWPARAM_LOAD(appKey)
     _lw_region = (LoRaMacRegion_t) nvram.getUChar("region", (uint8_t)LORAMAC_REGION_AU915);
     _lw_subband = nvram.getUChar("subband", 1);
-    _tx_duty_sec = nvram.getUInt("txduty", LORAWAN_APP_DEFAULT_TX_DUTYCYCLE);
+    _tx_duty_sec = nvram.getUInt("txduty", _tx_default_duty_sec);
 
     _tx_conf_num_retries = nvram.getUInt("txconfretries", 3);
 
@@ -681,6 +682,12 @@ bool YuboxLoRaWANConfigClass::_saveConfirmedTXRetries(void)
 
     nvram.end();
     return ok;
+}
+
+void YuboxLoRaWANConfigClass::setDefaultTXDutyCycle(uint32_t n_txduty)
+{
+    if (n_txduty < LORAWAN_APP_DEFAULT_TX_DUTYCYCLE) n_txduty = LORAWAN_APP_DEFAULT_TX_DUTYCYCLE;
+    _tx_default_duty_sec = n_txduty;
 }
 
 bool YuboxLoRaWANConfigClass::setRequestedTXDutyCycle(uint32_t n_txduty)

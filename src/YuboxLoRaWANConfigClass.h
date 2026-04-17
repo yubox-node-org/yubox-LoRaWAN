@@ -73,6 +73,7 @@ private:
   // Intervalo en segundos de TX DUTY configurado para aplicación. Es responsabilidad
   // de la aplicación instalar un callback o de otra forma recoger el valor, y
   // actualizarse para respetar este intervalo de TX DUTY
+  uint32_t _tx_default_duty_sec;
   uint32_t _tx_duty_sec;
   bool _tx_duty_sec_changed;
 
@@ -149,6 +150,7 @@ public:
   yuboxlorawan_event_id_t onTXConfirm(YuboxLoRaWAN_txconfirm_func_cb cb);
   void removeTXConfirm(yuboxlorawan_event_id_t cb);
 
+  void setDefaultTXDutyCycle(uint32_t);
   uint32_t getRequestedTXDutyCycle(void) { return _tx_duty_sec; }
   bool setRequestedTXDutyCycle(uint32_t);
 
