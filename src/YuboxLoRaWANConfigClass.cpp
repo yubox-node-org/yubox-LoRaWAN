@@ -72,6 +72,8 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
 
     _tx_conf_num_retries = 3;
     _tx_conf_display = false;
+    _last_rx_dataport = 0;
+    _enable_all_ports = false;
 
     // Estas claves se asumen pendientes de negociar
     _clearSessionKeys();
@@ -785,7 +787,7 @@ bool YuboxLoRaWANConfigClass::isJoined(void)
     return (_lorahw_init && (LMH_SET == lmh_join_status_get()));
 }
 
-bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
+bool YuboxLoRaWANConfigClass::send(uint8_t app_port, uint8_t * p, uint8_t n, bool is_txconfirmed)
 {
     if (!_lorahw_init) return false;
     if (!_lw_confExists || _lw_needsInit) return false;
@@ -793,7 +795,7 @@ bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
     if (lmh_join_status_get() != LMH_SET) return false;
 
     if (p == NULL) n = 0;
-    lmh_app_data_t m_lora_app_data = {p, n, LORAWAN_APP_PORT, 0, 0};
+    lmh_app_data_t m_lora_app_data = {p, n, app_port, 0, 0};
 
     lmh_error_status main_err = lmh_send(&m_lora_app_data, is_txconfirmed ? LMH_CONFIRMED_MSG : LMH_UNCONFIRMED_MSG);
 
@@ -820,7 +822,7 @@ bool YuboxLoRaWANConfigClass::send(uint8_t * p, uint8_t n, bool is_txconfirmed)
              * longitud cero, lo cual permite negociar un payload mayor según se reciba o no
              * en el gateway.
              */
-            m_lora_app_data.port = LORAWAN_APP_PORT;
+            m_lora_app_data.port = app_port;
             m_lora_app_data.buffsize = 0;
             lmh_error_status recv_err = lmh_send(&m_lora_app_data, LMH_UNCONFIRMED_MSG);
         }
@@ -984,14 +986,17 @@ void YuboxLoRaWANConfigClass::_join_handler(void)
     }
 }
 
-void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n)
+void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n, uint8_t app_port)
 {
+    _last_rx_dataport = app_port;
     _ts_ultimoRX = millis();
     _ts_lastDownlinkActivity = _ts_ultimoRX;
-    for (auto i = 0; i < cbRXList.size(); i++) {
-        YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-        if (entry.event_type == YBX_LW_RX) {
-            entry.rx_fcb(p, n);
+    if (_enable_all_ports || app_port == LORAWAN_APP_PORT) {
+        for (auto i = 0; i < cbRXList.size(); i++) {
+            YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
+            if (entry.event_type == YBX_LW_RX) {
+                entry.rx_fcb(p, n);
+            }
         }
     }
 
@@ -1069,10 +1074,8 @@ static void lorawan_rx_handler(lmh_app_data_t *app_data)
             }
         }
         break;
-    case LORAWAN_APP_PORT:
-        YuboxLoRaWANConf._rx_handler(app_data->buffer, app_data->buffsize);
-        break;
     default:
+        YuboxLoRaWANConf._rx_handler(app_data->buffer, app_data->buffsize, app_data->port);
         break;
     }
 }

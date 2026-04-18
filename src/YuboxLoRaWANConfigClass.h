@@ -89,6 +89,10 @@ private:
   // Número de veces que se reintentará la transmisión confirmada luego de fallo
   uint32_t _tx_conf_num_retries;
 
+  // Número de puerto de la última recepción downlink
+  bool _enable_all_ports;
+  uint8_t _last_rx_dataport;
+
   void _loadSavedCredentialsFromNVRAM(void);
   bool _saveCredentialsToNVRAM(void);
   void _clearSessionKeys(void);
@@ -155,17 +159,20 @@ public:
   bool setRequestedTXDutyCycle(uint32_t);
 
   // Enviar datos una vez confirmado que hay enlace a red
-  bool send(uint8_t * p, uint8_t n, bool is_txconfirmed = false);
+  bool send(uint8_t * p, uint8_t n, bool is_txconfirmed = false) { return send(LORAWAN_APP_PORT, p, n, is_txconfirmed); }
+  bool send(uint8_t app_port, uint8_t * p, uint8_t n, bool is_txconfirmed = false);
 
   uint32_t getNumTxConfRetries(void) { return _tx_conf_num_retries; }
 
   uint32_t getLastDownlinkActivity(void) { return _ts_lastDownlinkActivity; }
+  uint32_t getLastRxDataPort(void) { return _last_rx_dataport; }
+  void setEnableAllDataPorts(bool b) { _enable_all_ports = b; }
 
   // NO LLAMAR DESDE CÓDIGO LAS SIGUIENTES FUNCIONES
   void _joinstart_handler(void);
   void _join_handler(void);
   void _joinfail_handler(void);
-  void _rx_handler(uint8_t *, uint8_t);
+  void _rx_handler(uint8_t *, uint8_t, uint8_t);
   void _tx_confirmed_result(bool);
 };
 
