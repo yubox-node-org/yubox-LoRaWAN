@@ -168,6 +168,9 @@ public:
   uint32_t getLastRxDataPort(void) { return _last_rx_dataport; }
   void setEnableAllDataPorts(bool b) { _enable_all_ports = b; }
 
+  // Volcar a salida varios parámetros concernientes a la comunicación LoRa
+  void volcarParametrosComunicacion(void);
+
   // NO LLAMAR DESDE CÓDIGO LAS SIGUIENTES FUNCIONES
   void _joinstart_handler(void);
   void _join_handler(void);

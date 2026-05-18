@@ -758,6 +758,9 @@ void YuboxLoRaWANConfigClass::update(void)
             lmh_join();
             _joinstart_handler();
         }
+
+        log_d("Parámetros comunicación justo luego de inicializar LoRaWAN:");
+        volcarParametrosComunicacion();
     } else {
         // En versión 2.0.0+ el proceso de IRQ se mueve a tarea separada
         //Radio.IrqProcess();
@@ -774,11 +777,15 @@ void YuboxLoRaWANConfigClass::_sendActivityEventJSON(void)
 
 void YuboxLoRaWANConfigClass::_joinstart_handler(void)
 {
+    log_d("Parámetros comunicación justo luego de inicio JOIN:");
+    volcarParametrosComunicacion();
     _sendActivityEventJSON();
 }
 
 void YuboxLoRaWANConfigClass::_joinfail_handler(void)
 {
+    log_d("Parámetros comunicación justo luego de fallo JOIN:");
+    volcarParametrosComunicacion();
     _sendActivityEventJSON();
 }
 
@@ -798,6 +805,9 @@ bool YuboxLoRaWANConfigClass::send(uint8_t app_port, uint8_t * p, uint8_t n, boo
     lmh_app_data_t m_lora_app_data = {p, n, app_port, 0, 0};
 
     lmh_error_status main_err = lmh_send(&m_lora_app_data, is_txconfirmed ? LMH_CONFIRMED_MSG : LMH_UNCONFIRMED_MSG);
+
+    log_d("Parámetros comunicación justo luego de enviar uplink (PRINCIPAL):");
+    volcarParametrosComunicacion();
 
     _saveFrameCounters();
 
@@ -825,6 +835,9 @@ bool YuboxLoRaWANConfigClass::send(uint8_t app_port, uint8_t * p, uint8_t n, boo
             m_lora_app_data.port = app_port;
             m_lora_app_data.buffsize = 0;
             lmh_error_status recv_err = lmh_send(&m_lora_app_data, LMH_UNCONFIRMED_MSG);
+
+            log_d("Parámetros comunicación justo luego de enviar uplink (negociación ADR):");
+            volcarParametrosComunicacion();
         }
     } else {
         _ts_errorAfterJoin = 0;
@@ -923,6 +936,9 @@ void YuboxLoRaWANConfigClass::removeTXConfirm(yuboxlorawan_event_id_t id)
 
 void YuboxLoRaWANConfigClass::_join_handler(void)
 {
+    log_d("Parámetros comunicación justo luego de éxito JOIN:");
+    volcarParametrosComunicacion();
+
     if (_lw_useOTAA) {
         // Luego de negociar OTAA, se disponen de claves de sesión que deben ser guardadas
         MibRequestConfirm_t mibReq;
@@ -988,6 +1004,9 @@ void YuboxLoRaWANConfigClass::_join_handler(void)
 
 void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n, uint8_t app_port)
 {
+    log_d("Parámetros comunicación justo luego de recibir downlink:");
+    volcarParametrosComunicacion();
+
     _last_rx_dataport = app_port;
     _ts_ultimoRX = millis();
     _ts_lastDownlinkActivity = _ts_ultimoRX;
@@ -1017,6 +1036,9 @@ void YuboxLoRaWANConfigClass::_txdutychange_handler(void)
 
 void YuboxLoRaWANConfigClass::_tx_confirmed_result(bool r)
 {
+    log_d("Parámetros comunicación justo luego de resultado confirmación TX:");
+    volcarParametrosComunicacion();
+
     _tx_waiting_confirm = false;
     _ts_confirmTX_start = 0;
     if (r) {
@@ -1034,6 +1056,41 @@ void YuboxLoRaWANConfigClass::_tx_confirmed_result(bool r)
             entry.txc_fcb(r);
         }
     }
+}
+
+void YuboxLoRaWANConfigClass::volcarParametrosComunicacion(void)
+{
+    MibRequestConfirm_t mibReq;
+
+    memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+    mibReq.Type = MIB_ADR;
+    LoRaMacMibGetRequestConfirm(&mibReq);
+    log_d("- ADR = %s", mibReq.Param.AdrEnable ? "ACTIVO" : "INACTIVO");
+
+    memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+    mibReq.Type = MIB_CHANNELS_DEFAULT_DATARATE;
+    LoRaMacMibGetRequestConfirm(&mibReq);
+    log_d("- ChannelsDefaultDatarate = %u", mibReq.Param.ChannelsDefaultDatarate);
+
+    memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+    mibReq.Type = MIB_CHANNELS_DATARATE;
+    LoRaMacMibGetRequestConfirm(&mibReq);
+    log_d("- ChannelsDatarate = %u", mibReq.Param.ChannelsDatarate);
+
+    memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+    mibReq.Type = MIB_CHANNELS_TX_POWER;
+    LoRaMacMibGetRequestConfirm(&mibReq);
+    log_d("- ChannelsTxPower = %u", mibReq.Param.ChannelsTxPower);
+
+    memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+    mibReq.Type = MIB_UPLINK_COUNTER;
+    LoRaMacMibGetRequestConfirm(&mibReq);
+    log_d("- UpLinkCounter = %u", mibReq.Param.UpLinkCounter);
+
+    memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
+    mibReq.Type = MIB_DOWNLINK_COUNTER;
+    LoRaMacMibGetRequestConfirm(&mibReq);
+    log_d("- DownLinkCounter = %u", mibReq.Param.DownLinkCounter);
 }
 
 static void lorawan_confirm_class_handler(DeviceClass_t Class)
