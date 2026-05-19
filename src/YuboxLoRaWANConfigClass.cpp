@@ -967,7 +967,7 @@ void YuboxLoRaWANConfigClass::_join_handler(void)
 
         memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
         mibReq.Type = MIB_UPLINK_COUNTER;
-        mibReq.Param.UpLinkCounter = _lw_UpLinkCounter + 1;
+        mibReq.Param.UpLinkCounter = _lw_UpLinkCounter + 2;
         LoRaMacMibSetRequestConfirm(&mibReq);
 
         memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
