@@ -1,0 +1,1 @@
++lector lorawan wifi ntpconfig webauth yuboxOTA
