@@ -4,6 +4,8 @@
 #include <YuboxSimple.h>
 #include <TaskScheduler.h>
 
+#include <SparkFun_PCA9536_Arduino_Library.h>
+
 #include "YuboxLoRaWANConfigClass.h"
 
 #define ARDUINOJSON_USE_LONG_LONG 1
@@ -54,6 +56,11 @@ Task task_yuboxUploadLoRaWAN( TASK_SECOND * 10, TASK_FOREVER, &yuboxUploadLoRaWA
 static HDC2080 sensor_hdc2080(HDC2010_I2C_ADDR);
 static bool ok_sensor_hdc2080 = false;
 
+#define NUM_RELES_IMPL (PCA9536_MAX_GPIO+1)
+#define RELE_I2C_ADDR PCA9536_ADDRESS
+static PCA9536 releCtrl;
+static bool ok_relectrl = false;
+
 AsyncEventSource eventosLector("/yubox-api/lectura/events");
 
 void setup()
@@ -73,6 +80,7 @@ void setup()
   Wire.begin(YUBOX_I2C_SDA, YUBOX_I2C_SCL); 
 
   iniciarSensores();
+  iniciarActuadores();
 
   YuboxLoRaWANConf.begin(yubox_HTTPServer);
 
@@ -119,6 +127,22 @@ static void iniciarSensores(void)
   sensor_hdc2080.triggerMeasurement();
 
   ok_sensor_hdc2080 = true;
+  log_i("iniciado sensor ambiente: HDC2080");
+}
+
+static void iniciarActuadores(void)
+{
+  if (!test_i2cdev_presente(RELE_I2C_ADDR)) return;
+
+  releCtrl.begin();
+  if (releCtrl.isConnected()) {
+    ok_relectrl = true;
+    for (auto i = 0; i < NUM_RELES_IMPL; i++) {
+        releCtrl.pinMode(i, OUTPUT); // Definir los pines como salida
+        releCtrl.write(i, LOW); // Inicializar los pines en bajo (RELE APAGADO)
+    };
+    log_i("iniciado control de relé: PCA9356");
+  }
 }
 
 static void yuboxUpdateNTP(void)
@@ -137,9 +161,17 @@ static void lorawan_joined(void)
 
 static void lorawan_rx(uint8_t *p, uint8_t n)
 {
-    Serial.print("DEBUG: payload es: [");
-    Serial.write(p, n);
-    Serial.printf("] (%d bytes)\r\n", n);
+    log_i("Recibido payload, %u bytes", n);
+    uint8_t nuevo_estado[NUM_RELES_IMPL];
+    memset(nuevo_estado, 0, NUM_RELES_IMPL);
+    for (auto i = 0; i < n && i < NUM_RELES_IMPL; i++) {
+      nuevo_estado[i] = p[i] ? HIGH : LOW;
+    }
+    log_i("Nuevo estado relé a programar:");
+    for (auto i = 0; i < NUM_RELES_IMPL; i++) {
+      log_i("RELE[%u]: %s", i, nuevo_estado[i] ? "HIGH" : "LOW");
+      releCtrl.digitalWrite(i, nuevo_estado[i]);
+    }
 }
 
 static void lorawan_txdutychange(void)
