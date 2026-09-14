@@ -63,6 +63,7 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     memset(_lw_appKey, 0, sizeof(_lw_appKey));
     memset(_lw_default_devEUI, 0, sizeof(_lw_default_devEUI));
     _lw_confExists = false;
+    _lw_deleteConf = false;
     _lw_needsInit = true;
     _lorahw_init = false;
     _tx_waiting_confirm = false;
@@ -135,6 +136,23 @@ void YuboxLoRaWANConfigClass::destroySessionKeys(void)
 
     _destroySessionKeys(nvram);
     _lw_needsInit = true;
+}
+
+void YuboxLoRaWANConfigClass::destroySavedCredentials(void)
+{
+    Preferences nvram;
+    nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+
+    _destroySessionKeys(nvram);
+    _lw_needsInit = true;
+
+    nvram.remove("devEUI");
+    nvram.remove("appEUI");
+    nvram.remove("appKey");
+    memset(_lw_devEUI, 0, sizeof(_lw_devEUI));
+    memset(_lw_appEUI, 0, sizeof(_lw_appEUI));
+    memset(_lw_appKey, 0, sizeof(_lw_appKey));
+    _lw_confExists = false;
 }
 
 void YuboxLoRaWANConfigClass::_saveFrameCounters(Preferences & nvram)
@@ -384,6 +402,7 @@ void YuboxLoRaWANConfigClass::_setupHTTPRoutes(AsyncWebServer & srv)
   _pEvents->onConnect(std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawan_status_onConnect, this, std::placeholders::_1));
   srv.on("/yubox-api/lorawan/regions.json", HTTP_GET, std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanregionsjson_GET, this, std::placeholders::_1));
   srv.on("/yubox-api/lorawan/resetconn", HTTP_POST, std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanresetconn_POST, this, std::placeholders::_1));
+  srv.on("/yubox-api/lorawan/deletecred", HTTP_POST, std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawandeletecred_POST, this, std::placeholders::_1));
 }
 
 String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
@@ -393,11 +412,15 @@ String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
 #else
     JsonDocument json_doc;
 #endif
-    switch (lmh_join_status_get()) {
-    case LMH_RESET:     json_doc["join"] = "RESET"; break;
-    case LMH_SET:       json_doc["join"] = "SET"; break;
-    case LMH_ONGOING:   json_doc["join"] = "ONGOING"; break;
-    case LMH_FAILED:    json_doc["join"] = "FAILED"; break;
+    if (_lorahw_init && _lw_confExists && !_lw_needsInit) {
+        switch (lmh_join_status_get()) {
+        case LMH_RESET:     json_doc["join"] = "RESET"; break;
+        case LMH_SET:       json_doc["join"] = "SET"; break;
+        case LMH_ONGOING:   json_doc["join"] = "ONGOING"; break;
+        case LMH_FAILED:    json_doc["join"] = "FAILED"; break;
+        }
+    } else {
+        json_doc["join"] = "RESET";
     }
     if (_ts_ultimoTX_OK != 0) json_doc["tx_ok"] = _ts_ultimoTX_OK; else json_doc["tx_ok"] = (const char *)NULL;
     if (_ts_ultimoTX_FAIL != 0) json_doc["tx_fail"] = _ts_ultimoTX_FAIL; else json_doc["tx_fail"] = (const char *)NULL;
@@ -604,7 +627,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
 
 void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanresetconn_POST(AsyncWebServerRequest * request)
 {
-   YUBOX_RUN_AUTH(request);
+    YUBOX_RUN_AUTH(request);
 
     bool clientError = false;
     bool serverError = false;
@@ -618,6 +641,21 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanresetconn_POST(Async
     if (!_lw_useOTAA) destroySessionKeys();
 
     responseMsg = "Se desechan credenciales LoRaWAN y se reinicia negociación OTAA";
+
+    YBX_STD_RESPONSE
+}
+
+void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawandeletecred_POST(AsyncWebServerRequest * request)
+{
+    YUBOX_RUN_AUTH(request);
+
+    bool clientError = false;
+    bool serverError = false;
+    String responseMsg = "";
+
+    _lw_deleteConf = true;
+
+    responseMsg = "Se desechan claves y credenciales LoRaWAN y se detiene LoRaWAN";
 
     YBX_STD_RESPONSE
 }
@@ -709,6 +747,19 @@ bool YuboxLoRaWANConfigClass::setRequestedTXDutyCycle(uint32_t n_txduty)
 
 void YuboxLoRaWANConfigClass::update(void)
 {
+    if (_lw_deleteConf) {
+        _lw_deleteConf = false;
+
+        log_w("Se desechan claves y credenciales negociadas, se detiene LoRaWAN hasta volver a ingresar claves...");
+        _ts_errorAfterJoin = 0;
+        _lw_needsInit = true;
+
+        // Destruir cualquier clave de sesión, porque debe volverse a negociar OTAA
+        destroySavedCredentials();
+
+        _sendActivityEventJSON();
+    }
+
     if (!_lw_confExists) return;
 
     if (_tx_duty_sec_changed) {
@@ -743,6 +794,9 @@ void YuboxLoRaWANConfigClass::update(void)
             LORAWAN_DEFAULT_TX_POWER,
             LORAWAN_DUTYCYCLE_OFF
         };
+
+        log_d("Reseteando contadores de MAC...");
+        lmh_reset_mac();
 
         log_d("Para esta unión a la red LoRaWAN %s se usará OTAA...", _lw_useOTAA ? "SÍ" : "NO");
         uint32_t err_code = lmh_init(&_lora_callbacks, lora_param_init, _lw_useOTAA, CLASS_A, _lw_region);
@@ -784,7 +838,7 @@ void YuboxLoRaWANConfigClass::_joinfail_handler(void)
 
 bool YuboxLoRaWANConfigClass::isJoined(void)
 {
-    return (_lorahw_init && (LMH_SET == lmh_join_status_get()));
+    return (_lorahw_init && _lw_confExists && !_lw_needsInit && (LMH_SET == lmh_join_status_get()));
 }
 
 bool YuboxLoRaWANConfigClass::send(uint8_t app_port, uint8_t * p, uint8_t n, bool is_txconfirmed)

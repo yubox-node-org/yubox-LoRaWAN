@@ -42,42 +42,43 @@ function setupLoRaWANTab()
     });
 
     // https://getbootstrap.com/docs/4.4/components/navs/#events
+    const sel_region = pane.querySelector('select#region');
+    const span_connstatus = pane.querySelector('form span#lorawan_connstatus');
+    const span_txconfstatus = pane.querySelector('form span#lorawan_txconfstatus');
+
+    const lw_updatestatus = (data) => {
+        span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
+        const nstatus = {
+            'RESET':    ['badge-secondary', 'NO CONECTADO'],
+            'FAILED':   ['badge-danger',    'FALLO CONEXIÓN'],
+            'ONGOING':  ['badge-warning',   'CONECTANDO...'],
+            'SET':      ['badge-success',   'CONECTADO']
+        };
+        if (data.join in nstatus) {
+            span_connstatus.classList.add(nstatus[data.join][0]);
+            span_connstatus.textContent = nstatus[data.join][1]
+        }
+
+        if ('confirmtx_start' in data) {
+            span_txconfstatus.classList.remove('badge-secondary', 'badge-info');
+            if (data.confirmtx_start == null) {
+                span_txconfstatus.classList.add('badge-secondary');
+                span_txconfstatus.textContent = 'INACTIVO';
+            } else {
+                span_txconfstatus.classList.add('badge-info');
+                span_txconfstatus.textContent = 'EN PROCESO';
+            }
+        }
+    };
+
     getYuboxNavTab('lorawan')
     .on('shown.bs.tab', function (e) {
-        const sel_region = pane.querySelector('select#region');
-        const span_connstatus = pane.querySelector('form span#lorawan_connstatus');
-        const span_txconfstatus = pane.querySelector('form span#lorawan_txconfstatus');
         span_connstatus.classList.remove('badge-success', 'badge-danger');
         span_connstatus.classList.add('badge-secondary');
         span_connstatus.textContent = '(consultando)';
         span_txconfstatus.classList.remove('badge-secondary', 'badge-info');
         span_txconfstatus.classList.add('badge-secondary');
         span_txconfstatus.textContent = '(consultando)';
-
-        const lw_updatestatus = (data) => {
-            span_connstatus.classList.remove('badge-danger', 'badge-warning', 'badge-success', 'badge-secondary');
-            const nstatus = {
-                'RESET':    ['badge-secondary', 'NO CONECTADO'],
-                'FAILED':   ['badge-danger',    'FALLO CONEXIÓN'],
-                'ONGOING':  ['badge-warning',   'CONECTANDO...'],
-                'SET':      ['badge-success',   'CONECTADO']
-            };
-            if (data.join in nstatus) {
-                span_connstatus.classList.add(nstatus[data.join][0]);
-                span_connstatus.textContent = nstatus[data.join][1]
-            }
-
-            if ('confirmtx_start' in data) {
-                span_txconfstatus.classList.remove('badge-secondary', 'badge-info');
-                if (data.confirmtx_start == null) {
-                    span_txconfstatus.classList.add('badge-secondary');
-                    span_txconfstatus.textContent = 'INACTIVO';
-                } else {
-                    span_txconfstatus.classList.add('badge-info');
-                    span_txconfstatus.textContent = 'EN PROCESO';
-                }
-            }
-        };
 
         yuboxFetch('lorawan', 'regions.json')
         .then((data) => {
@@ -199,6 +200,41 @@ function setupLoRaWANTab()
                 yuboxMostrarAlertText('danger', r.msg);
             }
         }, e => yuboxStdAjaxFailHandler(e));
+    });
+
+    pane.querySelector('button[name=deletecred]').addEventListener('click', async function () {
+        if (!confirm('Confirme que se debe desechar TODAS las claves y credenciales y detener tráfico LoRaWAN')) return;
+
+        try {
+            const r = await yuboxFetch('lorawan', 'deletecred', {});
+            if (r.success) {
+                // Recargar los datos recién guardados del dispositivo
+                const data = await yuboxFetch('lorawan', 'config.json');
+
+                lw_updatestatus(data);
+
+                [
+                    ['select#region',           data.region],
+                    ['input#subband',           data.subband],
+                    ['input#deviceEUI_ESP32',   lorawan_formatEUI(data.deviceEUI_ESP32)],
+                    ['input#deviceEUI',         lorawan_formatEUI((data.deviceEUI == undefined) ? data.deviceEUI_ESP32 : data.deviceEUI)],
+                    ['input#appEUI',            ''],
+                    ['input#appKey',            ''],
+                    ['input#tx_duty_sec',       data.tx_duty_sec],
+                    ['input#txconf_retries',    (data.txconf_retries != null) ? data.txconf_retries : '3' ],
+                ].forEach(t => pane.querySelector(t[0]).value = t[1]);
+
+                pane.querySelector('div.txconfretries').style = (data.txconf_retries == null) ? 'display: none;' : '';
+
+                sel_region.dispatchEvent(new Event('change'));
+
+                yuboxMostrarAlertText('success', r.msg, 3000);
+            } else {
+                yuboxMostrarAlertText('danger', r.msg);
+            }
+        } catch (e) {
+            yuboxStdAjaxFailHandler(e);
+        }
     });
 }
 

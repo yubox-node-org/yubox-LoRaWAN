@@ -41,6 +41,8 @@ private:
   bool _lw_confExists;
   bool _lw_needsInit;
 
+  bool _lw_deleteConf;
+
   // Si no hay claves AES negociadas previamente, es necesario usar OTAA para obtenerlas.
   // De otro modo, se las ha leído de NVRAM y puede saltarse la negociación OTAA.
   uint8_t _lw_NwkSKey[16];
@@ -117,6 +119,7 @@ private:
   void _routeHandler_yuboxAPI_lorawanconfigjson_POST(AsyncWebServerRequest *);
   void _routeHandler_yuboxAPI_lorawanregionsjson_GET(AsyncWebServerRequest *);
   void _routeHandler_yuboxAPI_lorawanresetconn_POST(AsyncWebServerRequest *);
+  void _routeHandler_yuboxAPI_lorawandeletecred_POST(AsyncWebServerRequest *);
 
   String _bin2str(uint8_t *, size_t);
   bool _str2bin(const char *, uint8_t *, size_t);
@@ -137,6 +140,9 @@ public:
 
   // Destruir las claves de sesión y volver a empezar el join
   void destroySessionKeys(void);
+
+  // Destruir claves de sesión Y credenciales OTAA, y parar LoRaWAN hasta volver a ingresar credenciales
+  void destroySavedCredentials(void);
 
   // Instalar callback para aviso de unión exitosa a LoRaWAN
   yuboxlorawan_event_id_t onJoin(YuboxLoRaWAN_join_func_cb cbRX);
