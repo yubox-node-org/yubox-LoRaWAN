@@ -2,8 +2,8 @@
 
 #include "YuboxWebAuthClass.h"
 
-#include <LoRaWan-Arduino.h>
 #include <SPI.h>
+#include <RadioLib.h>
 #include "YuboxLoRaWANConfigClass.h"
 #include <YuboxParamPOST.h>
 
@@ -16,9 +16,62 @@
 #include "AsyncJson.h"
 #include "ArduinoJson.h"
 
+#if RADIOLIB_EXCLUDE_LORAWAN
+#error Esta biblioteca requiere soporte LoRaWAN de RadioLib (RADIOLIB_EXCLUDE_LORAWAN debe ser 0)
+#endif
+
 #define JOINREQ_NBTRIALS 3         /**< Number of trials for the join request. */
 
 #define LORAWAN_APP_DEFAULT_TX_DUTYCYCLE 10     /* Default number of seconds for duty cycle */
+
+// Datarate inicial luego de un join OTAA. Es el mismo valor (DR_3) que usaba
+// SX126x-Arduino como LORAWAN_DEFAULT_DATARATE. Con ADR activo, la red lo ajusta.
+#define YBX_LW_DEFAULT_DATARATE             3
+
+// Número total de transmisiones de un uplink confirmado si no se recibe ACK.
+// SX126x-Arduino usaba 8 intentos (1 sólo para AS923), con el mismo contador de trama.
+#define YBX_LW_CONFIRMED_NBTRIALS           8
+
+// Pausa luego de cada grupo de JOINREQ_NBTRIALS intentos fallidos de join
+#define YBX_LW_JOIN_RETRY_DELAY_MS          2000
+
+// Pausa luego de un intento de join que falló por error de radio o de configuración
+#define YBX_LW_JOIN_ERROR_DELAY_MS          5000
+
+// Intervalo de sondeo de downlinks en clase C
+#define YBX_LW_CLASSC_POLL_MS               10
+
+// Para reducir desgaste de flash, la sesión completa (~300 bytes) se guarda en NVRAM
+// sólo luego de join, de cada downlink, de cambio de clase, y cada este número de
+// uplinks. En los demás uplinks se guarda sólo el contador de uplink (4 bytes).
+#define YBX_LW_SESSION_FULLSAVE_UPLINKS     32
+
+// Al restaurar una sesión, el contador de uplink se adelanta en este valor sobre el
+// máximo valor guardado, por si se transmitió una trama que no alcanzó a guardarse.
+#define YBX_LW_FCNTUP_RESTORE_MARGIN        2
+
+// Si no hay ninguna transmisión exitosa en este intervalo luego de un primer
+// error de transmisión, se descarta la sesión y se vuelve a hacer join.
+#define YBX_LW_TX_ERROR_REJOIN_MS           (90 * 1000)
+
+// Parámetros de la tarea de radio. La prioridad es mayor que la del loop de Arduino
+// para respetar la temporización de las ventanas de recepción LoRaWAN.
+#define YBX_LW_TASK_NAME                    "YBX_LoRaWAN"
+#define YBX_LW_TASK_STACK                   8192
+#define YBX_LW_TASK_PRIO                    2
+
+// Claves privadas de NVRAM para persistencia de sesión RadioLib
+#define YBX_LW_NVKEY_NONCES                 "lwnonces"
+#define YBX_LW_NVKEY_SESSION                "lwsession"
+#define YBX_LW_NVKEY_FCNTUP                 "lwfcntup"
+
+// Estado de unión a la red, mismos nombres que reportaba SX126x-Arduino
+enum {
+  YBX_LW_JOIN_RESET = 0,
+  YBX_LW_JOIN_ONGOING,
+  YBX_LW_JOIN_SET,
+  YBX_LW_JOIN_FAILED,
+};
 
 typedef enum {
   YBX_LW_NETJOIN = 0,
@@ -48,16 +101,126 @@ static std::vector<YuboxLoRaWAN_rx_List_t> cbRXList;
 
 const char * YuboxLoRaWANConfigClass::_ns_nvram_yuboxframework_lorawan = "YUBOX/LoRaWAN";
 
-static void lorawan_has_joined_handler(void);
-static void lorawan_rx_handler(lmh_app_data_t *app_data);
-static void lorawan_confirm_class_handler(DeviceClass_t Class);
-static void lorawan_join_failed_handler(void);
-static void lorawan_confirmed_tx_result(bool);
+/*
+ * Subclase de LoRaWANNode para acceder a dos miembros protegidos de RadioLib:
+ * - fCntUp: para adelantar el contador de uplink al restaurar una sesión cuyo
+ *   contador se guardó por separado (ver YBX_LW_SESSION_FULLSAVE_UPLINKS).
+ * - nbTrans: para retransmitir uplinks confirmados con el mismo contador de trama,
+ *   como lo hacía SX126x-Arduino. RadioLib sólo usa el valor que asigna la red.
+ */
+class YuboxLoRaWANNode final : public LoRaWANNode
+{
+public:
+  YuboxLoRaWANNode(PhysicalLayer * phy, const LoRaWANBand_t * band, uint8_t subBand)
+    : LoRaWANNode(phy, band, subBand) {}
+
+  // Siguiente valor de contador de uplink que se usará
+  uint32_t getNextFCntUp(void) { return this->fCntUp; }
+  void advanceFCntUp(uint32_t minNext) { if (this->fCntUp < minNext) this->fCntUp = minNext; }
+
+  uint8_t getNbTrans(void) { return this->nbTrans; }
+  void setNbTrans(uint8_t n) { this->nbTrans = n; }
+};
+
+/*
+ * Tabla de regiones. El índice es el valor numérico que se usaba con SX126x-Arduino
+ * (enum LoRaMacRegion_t), que es el valor guardado en la clave NVRAM "region" y el
+ * que se reporta y recibe en el API web. Las regiones sin banda RadioLib (band NULL)
+ * no están soportadas por RadioLib.
+ */
+typedef struct {
+  const char * name;
+  const LoRaWANBand_t * band;
+  // Si la región tenía sub-bandas reales (bandas de canales fijos)
+  bool hasSubbands;
+} YuboxLoRaWANRegionInfo_t;
+
+#define YBX_LW_REGION_AS923   0
+#define YBX_LW_REGION_AU915   1
+
+static const YuboxLoRaWANRegionInfo_t _ybx_lw_regions[] = {
+  /*  0 */ { "Asia 923 MHz",              &AS923,   false },
+  /*  1 */ { "Australia 915 MHz",         &AU915,   true  },
+  /*  2 */ { "China 470 MHz",             &CN470,   true  },
+  /*  3 */ { "China 779 MHz",             NULL,     false },
+  /*  4 */ { "Europe 433 MHz",            &EU433,   false },
+  /*  5 */ { "Europe 868 MHz",            &EU868,   false },
+  /*  6 */ { "Korea 920 MHz",             &KR920,   false },
+  /*  7 */ { "India 865 MHz",             &IN865,   false },
+  /*  8 */ { "US 915 MHz",                &US915,   true  },
+  /*  9 */ { "Asia 923 MHz variante 2",   &AS923_2, false },
+  /* 10 */ { "Asia 923 MHz variante 3",   &AS923_3, false },
+  /* 11 */ { "Asia 923 MHz variante 4",   &AS923_4, false },
+  /* 12 */ { "Russia 864 MHz",            NULL,     false },
+};
+#define YBX_LW_NUM_REGIONS (sizeof(_ybx_lw_regions) / sizeof(_ybx_lw_regions[0]))
+
+// Sub-banda a asumir si la región guardada no está soportada por RadioLib
+#define YBX_LW_FALLBACK_SUBBAND 2
+
+// Estado privado de la tarea de radio
+struct YuboxLoRaWANConfigClass::_WorkerCtx
+{
+  enum { WK_IDLE, WK_JOINING, WK_JOINED } st;
+
+  // Generación y épocas de NVRAM vigentes para el trabajo en curso
+  uint32_t gen;
+  uint32_t sessionEpoch;
+  uint32_t credEpoch;
+  _JoinParams params;
+
+  YuboxLoRaWANNode * node;
+
+  uint32_t nextJoinTs;
+  uint32_t joinFails;
+
+  // Contador de uplink al momento del último guardado completo de sesión
+  uint32_t fcntLastFullSave;
+  // Último contador de uplink guardado en NVRAM (completo o por separado)
+  uint32_t fcntLastSaved;
+
+  // Copia de los últimos nonces guardados, para no reescribir si no cambian
+  uint8_t lastNonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
+
+  // Uplink vacío pendiente para informar cambio de clase a la red
+  bool classAckPending;
+
+  // Uplink vacío pendiente para negociar payload mayor luego de payload muy largo
+  bool emptyTxPending;
+  uint8_t emptyTxPort;
+
+  uint8_t txBuf[255];
+  uint8_t downBuf[RADIOLIB_LORAWAN_MAX_PAYLOAD_SIZE + 1];
+};
+
+// Candado recursivo con liberación automática al salir del ámbito
+class YuboxLoRaWANLockGuard
+{
+private:
+  SemaphoreHandle_t _m;
+public:
+  YuboxLoRaWANLockGuard(SemaphoreHandle_t m) : _m(m) { if (_m != NULL) xSemaphoreTakeRecursive(_m, portMAX_DELAY); }
+  ~YuboxLoRaWANLockGuard() { if (_m != NULL) xSemaphoreGiveRecursive(_m); }
+};
+
+static void _nvramRemoveIfExists(Preferences & nvram, const char * key)
+{
+    if (nvram.isKey(key)) nvram.remove(key);
+}
+
+// Conversión de EUI guardado (byte más significativo primero) a entero para RadioLib
+static uint64_t _eui2u64(const uint8_t * eui)
+{
+    uint64_t v = 0;
+    for (auto i = 0; i < 8; i++) v = (v << 8) | eui[i];
+    return v;
+}
 
 YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
 {
-    _lw_region = LORAMAC_REGION_AU915;
+    _lw_region = YBX_LW_REGION_AU915;
     _lw_subband = 1;
+    _lw_regionNeedsSave = false;
     memset(_lw_devEUI, 0, sizeof(_lw_devEUI));
     memset(_lw_appEUI, 0, sizeof(_lw_appEUI));
     memset(_lw_appKey, 0, sizeof(_lw_appKey));
@@ -76,21 +239,32 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     _last_rx_dataport = 0;
     _enable_all_ports = false;
 
+    _mtx = xSemaphoreCreateRecursiveMutex();
+    _phy = NULL;
+    _wk_task = NULL;
+    _wk_exit = false;
+    _wk_gen = 0;
+    memset(&_wk_joinParams, 0, sizeof(_wk_joinParams));
+    _sessionEpoch = 0;
+    _credEpoch = 0;
+    _joinStatus = YBX_LW_JOIN_RESET;
+    _wk_txPending = false;
+    _wk_txExecuting = false;
+    _wk_txConfirmed = false;
+    _wk_txInternal = false;
+    _wk_txPort = LORAWAN_APP_PORT;
+    _wk_txLen = 0;
+    _wk_maxPayloadLen = 0;
+    _ev_activity = false;
+    _ev_joined = false;
+    _ev_joinedNewSession = false;
+    _ev_txDone = false;
+    _ev_txOk = false;
+    _ev_txConfirmed = false;
+    _ev_txAck = false;
+
     // Estas claves se asumen pendientes de negociar
     _clearSessionKeys();
-
-    lmh_callback_t lora_callbacks = {
-        BoardGetBatteryLevel,
-        BoardGetUniqueId,
-        BoardGetRandomSeed,
-        lorawan_rx_handler,
-        lorawan_has_joined_handler,
-        lorawan_confirm_class_handler,
-        lorawan_join_failed_handler,
-        NULL,
-        lorawan_confirmed_tx_result,
-    };
-    _lora_callbacks = lora_callbacks;
 
     uint64_t uniqueId = ESP.getEfuseMac();
     for (auto i = 0; i < 8; i++) {
@@ -109,28 +283,39 @@ YuboxLoRaWANConfigClass::YuboxLoRaWANConfigClass(void)
     _tx_duty_sec_changed = false;
 }
 
+void YuboxLoRaWANConfigClass::_lock(void)
+{
+    if (_mtx != NULL) xSemaphoreTakeRecursive(_mtx, portMAX_DELAY);
+}
+
+void YuboxLoRaWANConfigClass::_unlock(void)
+{
+    if (_mtx != NULL) xSemaphoreGiveRecursive(_mtx);
+}
+
 void YuboxLoRaWANConfigClass::_clearSessionKeys()
 {
-    memset(_lw_NwkSKey, 0, sizeof(_lw_NwkSKey));
-    memset(_lw_AppSKey, 0, sizeof(_lw_AppSKey));
-    _lw_DevAddr = 0;
-    _lw_UpLinkCounter = 0;
-    _lw_DownLinkCounter = 0;
     _lw_useOTAA = true;
 }
 
 void YuboxLoRaWANConfigClass::_destroySessionKeys(Preferences & nvram)
 {
+    YuboxLoRaWANLockGuard g(_mtx);
+
     _clearSessionKeys();
-    nvram.remove("NwkSKey");
-    nvram.remove("AppSKey");
-    nvram.remove("devaddr");
-    nvram.remove("uplinkcnt");
-    nvram.remove("downlinkcnt");
+
+    // Invalidar cualquier escritura de sesión en curso por parte de la tarea de radio
+    _sessionEpoch++;
+
+    // Los nonces se conservan a propósito: el DevNonce debe seguir creciendo
+    // entre negociaciones OTAA con las mismas credenciales.
+    _nvramRemoveIfExists(nvram, YBX_LW_NVKEY_SESSION);
+    _nvramRemoveIfExists(nvram, YBX_LW_NVKEY_FCNTUP);
 }
 
 void YuboxLoRaWANConfigClass::destroySessionKeys(void)
 {
+    YuboxLoRaWANLockGuard g(_mtx);
     Preferences nvram;
     nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
 
@@ -140,46 +325,63 @@ void YuboxLoRaWANConfigClass::destroySessionKeys(void)
 
 void YuboxLoRaWANConfigClass::destroySavedCredentials(void)
 {
+    YuboxLoRaWANLockGuard g(_mtx);
     Preferences nvram;
     nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
 
     _destroySessionKeys(nvram);
     _lw_needsInit = true;
 
+    // Invalidar cualquier escritura de nonces en curso por parte de la tarea de radio
+    _credEpoch++;
+
     nvram.remove("devEUI");
     nvram.remove("appEUI");
     nvram.remove("appKey");
+    _nvramRemoveIfExists(nvram, YBX_LW_NVKEY_NONCES);
     memset(_lw_devEUI, 0, sizeof(_lw_devEUI));
     memset(_lw_appEUI, 0, sizeof(_lw_appEUI));
     memset(_lw_appKey, 0, sizeof(_lw_appKey));
     _lw_confExists = false;
+
+    // Detener la tarea de radio y descartar cualquier evento pendiente
+    _wk_gen++;
+    _wk_txPending = false;
+    _joinStatus = YBX_LW_JOIN_RESET;
+    _ev_activity = false;
+    _ev_joined = false;
+    _ev_txDone = false;
+    _ev_rxQueue.clear();
+    _stopWorker();
 }
 
-void YuboxLoRaWANConfigClass::_saveFrameCounters(Preferences & nvram)
+void YuboxLoRaWANConfigClass::_removeLegacySessionKeys(void)
 {
-    MibRequestConfirm_t mibReq;
-
-    memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
-    mibReq.Type = MIB_UPLINK_COUNTER;
-    LoRaMacMibGetRequestConfirm(&mibReq);
-    _lw_UpLinkCounter = mibReq.Param.UpLinkCounter;
-    log_v("- UpLinkCounter = %u", _lw_UpLinkCounter);
-    nvram.putUInt("uplinkcnt", _lw_UpLinkCounter);
-
-    memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
-    mibReq.Type = MIB_DOWNLINK_COUNTER;
-    LoRaMacMibGetRequestConfirm(&mibReq);
-    _lw_DownLinkCounter = mibReq.Param.DownLinkCounter;
-    log_v("- DownLinkCounter = %u", _lw_DownLinkCounter);
-    nvram.putUInt("downlinkcnt", _lw_DownLinkCounter);
-}
-
-void YuboxLoRaWANConfigClass::_saveFrameCounters(void)
-{
+    // Claves de sesión usadas por la implementación anterior basada en SX126x-Arduino.
+    // Su formato no es compatible con RadioLib, así que se descartan.
+    static const char * legacyKeys[] = { "NwkSKey", "AppSKey", "devaddr", "uplinkcnt", "downlinkcnt" };
+    bool found = false;
     Preferences nvram;
+
+    if (nvram.begin(_ns_nvram_yuboxframework_lorawan, true)) {
+        for (auto i = 0; i < sizeof(legacyKeys) / sizeof(legacyKeys[0]); i++) {
+            if (nvram.isKey(legacyKeys[i])) found = true;
+        }
+        nvram.end();
+    }
+    if (!found) return;
+
+    log_w("Se descartan claves de sesión LoRaWAN de implementación anterior, se requerirá negociar OTAA");
     nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
-    _saveFrameCounters(nvram);
+    for (auto i = 0; i < sizeof(legacyKeys) / sizeof(legacyKeys[0]); i++) {
+        _nvramRemoveIfExists(nvram, legacyKeys[i]);
+    }
+    nvram.end();
 }
+
+/* ======================================================================== */
+/* [PLACA] Pines de conexión entre ESP32 y el chip de radio                  */
+/* ======================================================================== */
 
 #ifdef YUBOX_HELTEC_WIFI_LORA_V3
 
@@ -228,34 +430,95 @@ const int RADIO_RXEN        = 15;   // LORA ANTENNA RX ENABLE
 
 #endif
 
+// Bus SPI propio para el radio. Se usa el bus por omisión de SPIClass, igual
+// que SX126x-Arduino, para no interferir con el objeto global SPI.
+static SPIClass * _ybx_lw_spi = NULL;
+static Module * _ybx_lw_module = NULL;
+
+/* ======================================================================== */
+/* [CHIPSET SX1262] Inicio de la sección específica del chip de radio        */
+/* Para migrar a otro chipset (p.ej. LR1121), sólo debería reemplazarse      */
+/* esta sección: crear el objeto de radio, configurarlo, dormirlo y          */
+/* nombrarlo. El resto del código usa PhysicalLayer y LoRaWANNode.           */
+/* ======================================================================== */
+
+// Configuración idéntica a la usada con SX126x-Arduino: TCXO controlado por DIO3
+// a 3.3 V, regulador DC-DC (no LDO), y DIO2 NO usado como control de antena.
+#define YBX_SX1262_TCXO_VOLTAGE     3.3
+#define YBX_SX1262_USE_LDO          false
+#define YBX_SX1262_DIO2_RFSWITCH    false
+
+static SX1262 * _ybx_lw_sx1262 = NULL;
+
+bool YuboxLoRaWANConfigClass::_chipsetInitRadio(void)
+{
+    if (_phy != NULL) return true;
+
+    if (_ybx_lw_spi == NULL) {
+        _ybx_lw_spi = new SPIClass();
+        _ybx_lw_spi->begin(PIN_LORA_SCLK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_NSS);
+    }
+    if (_ybx_lw_module == NULL) {
+        _ybx_lw_module = new Module(PIN_LORA_NSS, PIN_LORA_DIO_1, PIN_LORA_RESET, PIN_LORA_BUSY, *_ybx_lw_spi);
+
+        // Conmutador de antena controlado por pines TX ENABLE y RX ENABLE. Igual que en
+        // SX126x-Arduino, sólo se usa si ambos pines están definidos. En TX y RX los
+        // niveles son los mismos que antes. En reposo RadioLib pone ambos en bajo.
+        if (RADIO_RXEN != -1 && RADIO_TXEN != -1) {
+            _ybx_lw_module->setRfSwitchPins(RADIO_RXEN, RADIO_TXEN);
+        }
+    }
+    if (_ybx_lw_sx1262 == NULL) {
+        _ybx_lw_sx1262 = new SX1262(_ybx_lw_module);
+    }
+
+    // La frecuencia y modulación inicial son irrelevantes, LoRaWAN las reconfigura
+    // en cada transmisión y recepción.
+    int16_t state = _ybx_lw_sx1262->begin(
+        915.0, 125.0, 9, 7,
+        RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 10, 8,
+        YBX_SX1262_TCXO_VOLTAGE, YBX_SX1262_USE_LDO);
+    if (state != RADIOLIB_ERR_NONE) {
+        log_e("Fallo al inicializar SX1262 - %d", state);
+        return false;
+    }
+
+    // RadioLib activa DIO2 como control de antena por omisión
+    state = _ybx_lw_sx1262->setDio2AsRfSwitch(YBX_SX1262_DIO2_RFSWITCH);
+    if (state != RADIOLIB_ERR_NONE) {
+        log_e("Fallo al configurar DIO2 de SX1262 - %d", state);
+        return false;
+    }
+
+    _phy = _ybx_lw_sx1262;
+    return true;
+}
+
+void YuboxLoRaWANConfigClass::_chipsetSleepRadio(void)
+{
+    if (_ybx_lw_sx1262 != NULL) _ybx_lw_sx1262->sleep();
+}
+
+const char * YuboxLoRaWANConfigClass::_chipsetName(void)
+{
+    return "SX1262";
+}
+
+/* ======================================================================== */
+/* [CHIPSET SX1262] Fin de la sección específica del chip de radio           */
+/* ======================================================================== */
+
 bool YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv, bool displayTxConf)
 {
     _tx_conf_display = displayTxConf;
 
     _loadSavedCredentialsFromNVRAM();
+    _removeLegacySessionKeys();
     _setupHTTPRoutes(srv);
 
-    hw_config hwConfig;
-    // Define the HW configuration between MCU and SX126x
-    hwConfig.CHIP_TYPE = SX1262_CHIP;      // Example uses an eByte E22 module with an SX1262
-    hwConfig.PIN_LORA_RESET = PIN_LORA_RESET; // LORA RESET
-    hwConfig.PIN_LORA_NSS = PIN_LORA_NSS;   // LORA SPI CS
-    hwConfig.PIN_LORA_SCLK = PIN_LORA_SCLK;   // LORA SPI CLK
-    hwConfig.PIN_LORA_MISO = PIN_LORA_MISO;   // LORA SPI MISO
-    hwConfig.PIN_LORA_DIO_1 = PIN_LORA_DIO_1; // LORA DIO_1
-    hwConfig.PIN_LORA_BUSY = PIN_LORA_BUSY;   // LORA SPI BUSY
-    hwConfig.PIN_LORA_MOSI = PIN_LORA_MOSI;   // LORA SPI MOSI
-    hwConfig.RADIO_TXEN = RADIO_TXEN;      // LORA ANTENNA TX ENABLE
-    hwConfig.RADIO_RXEN = RADIO_RXEN;      // LORA ANTENNA RX ENABLE
-    hwConfig.USE_DIO2_ANT_SWITCH = false;
-    hwConfig.USE_DIO3_TCXO = true;        // Example uses an CircuitRocks Alora RFM1262 which uses DIO3 to control oscillator voltage
-    hwConfig.USE_DIO3_ANT_SWITCH = false;   // Only Insight ISP4520 module uses DIO3 as antenna control
-
-    uint32_t err_code = lora_hardware_init(hwConfig);
-    if (err_code != 0) {
-        log_e("lora_hardware_init failed - %d", err_code);
-    } else {
-        _lorahw_init = true;
+    _lorahw_init = _chipsetInitRadio();
+    if (!_lorahw_init) {
+        log_e("Fallo al inicializar hardware de radio %s", _chipsetName());
     }
 
     return _lorahw_init;
@@ -263,6 +526,7 @@ bool YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv, bool displayTxConf)
 
 void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
 {
+    YuboxLoRaWANLockGuard g(_mtx);
     Preferences nvram;
     bool ok = true;
 
@@ -279,116 +543,69 @@ void YuboxLoRaWANConfigClass::_loadSavedCredentialsFromNVRAM(void)
     LWPARAM_LOAD(devEUI)
     LWPARAM_LOAD(appEUI)
     LWPARAM_LOAD(appKey)
-    _lw_region = (LoRaMacRegion_t) nvram.getUChar("region", (uint8_t)LORAMAC_REGION_AU915);
-    _lw_subband = nvram.getUChar("subband", 1);
+    uint8_t n_region = nvram.getUChar("region", YBX_LW_REGION_AU915);
+    uint8_t n_subband = nvram.getUChar("subband", 1);
     _tx_duty_sec = nvram.getUInt("txduty", _tx_default_duty_sec);
 
     _tx_conf_num_retries = nvram.getUInt("txconfretries", 3);
 
-    // Validar si región seleccionada es válida...
-    if (!_isValidLoRaWANRegion((uint8_t)_lw_region)) _lw_region = LORAMAC_REGION_AU915;
+    _lw_regionNeedsSave = false;
+    if (n_region < YBX_LW_NUM_REGIONS && _ybx_lw_regions[n_region].band == NULL) {
+        // Región conocida pero no implementada en RadioLib
+        log_e("Región LoRaWAN guardada %u (%s) no está soportada por RadioLib, se asume %s",
+            n_region, _ybx_lw_regions[n_region].name, _ybx_lw_regions[YBX_LW_REGION_AU915].name);
+        bool keepSubband = (_ybx_lw_regions[n_region].hasSubbands
+            && n_subband >= 1 && n_subband <= _getMaxLoRaWANRegionSubchannel(YBX_LW_REGION_AU915));
+        n_region = YBX_LW_REGION_AU915;
+        if (!keepSubband) n_subband = YBX_LW_FALLBACK_SUBBAND;
+        _lw_regionNeedsSave = true;
+    } else if (!_isValidLoRaWANRegion(n_region)) {
+        // Validar si región seleccionada es válida...
+        n_region = YBX_LW_REGION_AU915;
+        _lw_regionNeedsSave = true;
+    }
+    _lw_region = n_region;
+    _lw_subband = n_subband;
 
     // Validar si sub-banda almacenada es válida para región...
     if (_lw_subband < 1) _lw_subband = 1;
-    if (_lw_subband > _getMaxLoRaWANRegionSubchannel(_lw_region)) _lw_subband = 1;
+    if (_lw_subband > _getMaxLoRaWANRegionSubchannel(_lw_region)) {
+        log_w("Sub-banda guardada %u no es válida para región %s, se asume 1",
+            _lw_subband, _getLoRaWANRegionName(_lw_region));
+        _lw_subband = 1;
+        _lw_regionNeedsSave = true;
+    }
 
     _lw_confExists = ok;
 
-    if (ok) {
-        // Cargar claves de sesión, si están presentes
-        LWPARAM_LOAD(NwkSKey)
-        LWPARAM_LOAD(AppSKey)
-        if (!nvram.isKey("devaddr")) ok = false;
-        if (ok) _lw_DevAddr = nvram.getUInt("devaddr", 0); if (_lw_DevAddr == 0) ok = false;
-        if (ok) _lw_UpLinkCounter = nvram.getUInt("uplinkcnt", 0);
+    // Si hay sesión guardada, la siguiente conexión intentará restaurarla en lugar de OTAA
+    _clearSessionKeys();
+    if (ok && nvram.isKey(YBX_LW_NVKEY_SESSION)) _lw_useOTAA = false;
 
-        // Contador de downlink puede se legítimamente 0 si sólo se envía y no recibe.
-        if (ok) _lw_DownLinkCounter = nvram.getUInt("downlinkcnt", 0);
-
-        if (ok) _lw_useOTAA = false;
-    }
-
-    if (!ok) _clearSessionKeys();
+    nvram.end();
 }
 
 bool YuboxLoRaWANConfigClass::_isValidLoRaWANRegion(uint8_t r)
 {
-    switch (r) {
-    case LORAMAC_REGION_AS923:
-    case LORAMAC_REGION_AU915:
-    case LORAMAC_REGION_CN470:
-    case LORAMAC_REGION_CN779:
-    case LORAMAC_REGION_EU433:
-    case LORAMAC_REGION_EU868:
-    case LORAMAC_REGION_KR920:
-    case LORAMAC_REGION_IN865:
-    case LORAMAC_REGION_US915:
-    case LORAMAC_REGION_AS923_2:
-    case LORAMAC_REGION_AS923_3:
-    case LORAMAC_REGION_AS923_4:
-    case LORAMAC_REGION_RU864:
-        return true;
-    default:
-        return false;
-    }
+    return (r < YBX_LW_NUM_REGIONS && _ybx_lw_regions[r].band != NULL);
 }
 
-const char * YuboxLoRaWANConfigClass::_getLoRaWANRegionName(LoRaMacRegion_t region)
+const char * YuboxLoRaWANConfigClass::_getLoRaWANRegionName(uint8_t region)
 {
-    switch (region) {
-    case LORAMAC_REGION_AS923:
-        return "Asia 923 MHz";
-    case LORAMAC_REGION_AU915:
-        return "Australia 915 MHz";
-    case LORAMAC_REGION_CN470:
-        return "China 470 MHz";
-    case LORAMAC_REGION_CN779:
-        return "China 779 MHz";
-    case LORAMAC_REGION_EU433:
-        return "Europe 433 MHz";
-    case LORAMAC_REGION_EU868:
-        return "Europe 868 MHz";
-    case LORAMAC_REGION_KR920:
-        return "Korea 920 MHz";
-    case LORAMAC_REGION_IN865:
-        return "India 865 MHz";
-    case LORAMAC_REGION_US915:
-        return "US 915 MHz";
-    case LORAMAC_REGION_AS923_2:
-        return "Asia 923 MHz variante 2";
-    case LORAMAC_REGION_AS923_3:
-        return "Asia 923 MHz variante 3";
-    case LORAMAC_REGION_AS923_4:
-        return "Asia 923 MHz variante 4";
-    case LORAMAC_REGION_RU864:
-        return "Russia 864 MHz";
-    default:
-        return "(región no válida o no descrita)";
-    }
+    if (region < YBX_LW_NUM_REGIONS) return _ybx_lw_regions[region].name;
+    return "(región no válida o no descrita)";
 }
 
-uint8_t YuboxLoRaWANConfigClass::_getMaxLoRaWANRegionSubchannel(LoRaMacRegion_t region)
+uint8_t YuboxLoRaWANConfigClass::_getMaxLoRaWANRegionSubchannel(uint8_t region)
 {
-    switch (region) {
-    case LORAMAC_REGION_AU915:
-    case LORAMAC_REGION_US915:
-        return 9;
-    case LORAMAC_REGION_CN470:
-        return 12;
-    case LORAMAC_REGION_CN779:
-    case LORAMAC_REGION_EU433:
-    case LORAMAC_REGION_EU868:
-    case LORAMAC_REGION_KR920:
-    case LORAMAC_REGION_IN865:
-        return 2;
-    case LORAMAC_REGION_AS923:
-    case LORAMAC_REGION_AS923_2:
-    case LORAMAC_REGION_AS923_3:
-    case LORAMAC_REGION_AS923_4:
-    case LORAMAC_REGION_RU864:
-    default:
-        return 1;
-    }
+    if (!_isValidLoRaWANRegion(region)) return 1;
+
+    const LoRaWANBand_t * band = _ybx_lw_regions[region].band;
+
+    // RadioLib sólo usa sub-bandas en bandas de canales fijos, en grupos de 8 canales
+    // de 125 kHz. En bandas dinámicas el valor de sub-banda se ignora.
+    if (band->bandType != RADIOLIB_LORAWAN_BAND_FIXED) return 1;
+    return band->txSpans[0].numChannels / 8;
 }
 
 
@@ -405,6 +622,23 @@ void YuboxLoRaWANConfigClass::_setupHTTPRoutes(AsyncWebServer & srv)
   srv.on("/yubox-api/lorawan/deletecred", HTTP_POST, std::bind(&YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawandeletecred_POST, this, std::placeholders::_1));
 }
 
+uint8_t YuboxLoRaWANConfigClass::_getJoinStatus(void)
+{
+    YuboxLoRaWANLockGuard g(_mtx);
+    return _joinStatus;
+}
+
+const char * YuboxLoRaWANConfigClass::_getJoinStatusName(void)
+{
+    switch (_getJoinStatus()) {
+    case YBX_LW_JOIN_SET:       return "SET";
+    case YBX_LW_JOIN_ONGOING:   return "ONGOING";
+    case YBX_LW_JOIN_FAILED:    return "FAILED";
+    case YBX_LW_JOIN_RESET:
+    default:                    return "RESET";
+    }
+}
+
 String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
 {
 #if ARDUINOJSON_VERSION_MAJOR <= 6
@@ -413,12 +647,7 @@ String YuboxLoRaWANConfigClass::_reportActivityJSON(void)
     JsonDocument json_doc;
 #endif
     if (_lorahw_init && _lw_confExists && !_lw_needsInit) {
-        switch (lmh_join_status_get()) {
-        case LMH_RESET:     json_doc["join"] = "RESET"; break;
-        case LMH_SET:       json_doc["join"] = "SET"; break;
-        case LMH_ONGOING:   json_doc["join"] = "ONGOING"; break;
-        case LMH_FAILED:    json_doc["join"] = "FAILED"; break;
-        }
+        json_doc["join"] = _getJoinStatusName();
     } else {
         json_doc["join"] = "RESET";
     }
@@ -448,7 +677,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanregionsjson_GET(Asyn
 
     // Cuántas regiones soporta esta versión de la biblioteca?
     uint8_t numRegions = 0;
-    while (_isValidLoRaWANRegion(numRegions)) numRegions++;
+    for (auto i = 0; i < YBX_LW_NUM_REGIONS; i++) if (_isValidLoRaWANRegion(i)) numRegions++;
 
     AsyncResponseStream *response = request->beginResponseStream("application/json");
 #if ARDUINOJSON_VERSION_MAJOR <= 6
@@ -457,7 +686,11 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanregionsjson_GET(Asyn
     JsonDocument json_doc;
 #endif
 
-    for (auto i = 0; i < numRegions; i++) {
+    // Se conservan los identificadores originales, aunque queden huecos para las
+    // regiones no soportadas por RadioLib.
+    for (auto i = 0; i < YBX_LW_NUM_REGIONS; i++) {
+        if (!_isValidLoRaWANRegion(i)) continue;
+
         JsonObject region =
 #if ARDUINOJSON_VERSION_MAJOR <= 6
             json_doc.createNestedObject();
@@ -465,8 +698,8 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanregionsjson_GET(Asyn
             json_doc.add<JsonObject>();
 #endif
         region["id"] = i;
-        region["name"] = _getLoRaWANRegionName((LoRaMacRegion_t)i);
-        region["max_sb"] = _getMaxLoRaWANRegionSubchannel((LoRaMacRegion_t)i);
+        region["name"] = _getLoRaWANRegionName(i);
+        region["max_sb"] = _getMaxLoRaWANRegionSubchannel(i);
     }
 
     serializeJson(json_doc, *response);
@@ -484,22 +717,22 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_GET(Async
     JsonDocument json_doc;
 #endif
 
-    json_doc["region"] = (unsigned int)_lw_region;
-    String s_default_devEUI = _bin2str(_lw_default_devEUI, sizeof(_lw_default_devEUI));
-    String s_devEUI = _lw_confExists ? _bin2str(_lw_devEUI, sizeof(_lw_devEUI)) : s_default_devEUI;
-    String s_appEUI = _lw_confExists ? _bin2str(_lw_appEUI, sizeof(_lw_appEUI)) : "";
-    String s_appKey = _lw_confExists ? _bin2str(_lw_appKey, sizeof(_lw_appKey)) : "";
+    String s_default_devEUI, s_devEUI, s_appEUI, s_appKey;
+    {
+        YuboxLoRaWANLockGuard g(_mtx);
+
+        json_doc["region"] = (unsigned int)_lw_region;
+        s_default_devEUI = _bin2str(_lw_default_devEUI, sizeof(_lw_default_devEUI));
+        s_devEUI = _lw_confExists ? _bin2str(_lw_devEUI, sizeof(_lw_devEUI)) : s_default_devEUI;
+        s_appEUI = _lw_confExists ? _bin2str(_lw_appEUI, sizeof(_lw_appEUI)) : "";
+        s_appKey = _lw_confExists ? _bin2str(_lw_appKey, sizeof(_lw_appKey)) : "";
+        json_doc["subband"] = _lw_subband;
+    }
     json_doc["deviceEUI_ESP32"] = s_default_devEUI.c_str();
     json_doc["deviceEUI"] = s_devEUI.c_str();
     json_doc["appEUI"] = s_appEUI.c_str();
     json_doc["appKey"] = s_appKey.c_str();
-    json_doc["subband"] = _lw_subband;
-    switch (lmh_join_status_get()) {
-    case LMH_RESET:     json_doc["join"] = "RESET"; break;
-    case LMH_SET:       json_doc["join"] = "SET"; break;
-    case LMH_ONGOING:   json_doc["join"] = "ONGOING"; break;
-    case LMH_FAILED:    json_doc["join"] = "FAILED"; break;
-    }
+    json_doc["join"] = _getJoinStatusName();
     json_doc["tx_duty_sec"] = getRequestedTXDutyCycle();
 
     if (_tx_waiting_confirm)
@@ -539,7 +772,7 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
     }
 
     YBX_ASSIGN_NUM_FROM_POST(subband, "Sub-banda", "%hhu", YBX_POST_VAR_NONEMPTY, n_subband)
-    if (!clientError && !(n_subband >= 1 && n_subband <= _getMaxLoRaWANRegionSubchannel((LoRaMacRegion_t)n_region))) {
+    if (!clientError && !(n_subband >= 1 && n_subband <= _getMaxLoRaWANRegionSubchannel(n_region))) {
         clientError = true;
         responseMsg = "Sub-banda no está en rango requerido para región";
     }
@@ -584,6 +817,8 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
     }
 
     if (!clientError) {
+        YuboxLoRaWANLockGuard g(_mtx);
+
         bool paramIguales = (
             (0 == memcmp(_lw_devEUI, n_deviceEUI, sizeof(_lw_devEUI))) &&
             (0 == memcmp(_lw_appEUI, n_appEUI, sizeof(_lw_appEUI))) &&
@@ -593,12 +828,20 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanconfigjson_POST(Asyn
         memcpy(_lw_devEUI, n_deviceEUI, sizeof(_lw_devEUI));
         memcpy(_lw_appEUI, n_appEUI, sizeof(_lw_appEUI));
         memcpy(_lw_appKey, n_appKey, sizeof(_lw_appKey));
-        _lw_region = (LoRaMacRegion_t)n_region;
+        _lw_region = n_region;
         _lw_subband = n_subband;
 
         _tx_conf_num_retries = n_tx_conf_num_retries;
 
-        if (!paramIguales) serverError = !_saveCredentialsToNVRAM();
+        if (!paramIguales) {
+            serverError = !_saveCredentialsToNVRAM();
+        } else if (_lw_regionNeedsSave) {
+            // La región en NVRAM no era utilizable y se asumió otra. Se guarda la
+            // asumida sin descartar la sesión, porque los parámetros de red no cambian.
+            serverError = !_saveRegionToNVRAM();
+        }
+        if (!serverError) _lw_regionNeedsSave = false;
+
         if (serverError) {
             responseMsg = "No se pueden guardar valores LoRaWAN";
         } else if (!setRequestedTXDutyCycle(n_tx_duty_sec)) {
@@ -634,11 +877,15 @@ void YuboxLoRaWANConfigClass::_routeHandler_yuboxAPI_lorawanresetconn_POST(Async
     String responseMsg = "";
 
     log_w("Se desechan credenciales negociadas, se volverá a intentar OTAA para negociación LoRaWAN...");
-    _ts_errorAfterJoin = 0;
-    _lw_needsInit = true;
+    {
+        YuboxLoRaWANLockGuard g(_mtx);
 
-    // Destruir cualquier clave de sesión, porque debe volverse a negociar OTAA
-    if (!_lw_useOTAA) destroySessionKeys();
+        _ts_errorAfterJoin = 0;
+        _lw_needsInit = true;
+
+        // Destruir cualquier clave de sesión, porque debe volverse a negociar OTAA
+        if (!_lw_useOTAA) destroySessionKeys();
+    }
 
     responseMsg = "Se desechan credenciales LoRaWAN y se reinicia negociación OTAA";
 
@@ -693,6 +940,7 @@ bool YuboxLoRaWANConfigClass::_str2bin(const char * s, uint8_t * p, size_t n)
 
 bool YuboxLoRaWANConfigClass::_saveCredentialsToNVRAM(void)
 {
+    YuboxLoRaWANLockGuard g(_mtx);
     bool ok = true;
     Preferences nvram;
     nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
@@ -705,6 +953,20 @@ bool YuboxLoRaWANConfigClass::_saveCredentialsToNVRAM(void)
 
     // Cuando se guardan nuevas claves, se debe asumir que las claves de sesión se invalidan
     _destroySessionKeys(nvram);
+
+    nvram.end();
+    return ok;
+}
+
+bool YuboxLoRaWANConfigClass::_saveRegionToNVRAM(void)
+{
+    YuboxLoRaWANLockGuard g(_mtx);
+    bool ok = true;
+    Preferences nvram;
+    nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+
+    if (ok && !nvram.putUChar("region", (uint8_t)_lw_region)) ok = false;
+    if (ok && !nvram.putUChar("subband", _lw_subband)) ok = false;
 
     nvram.end();
     return ok;
@@ -777,45 +1039,78 @@ void YuboxLoRaWANConfigClass::update(void)
         _num_confirmTX_FAIL = 0;
         _ts_lastDownlinkActivity = 0;
 
-        // Setup the EUIs and Keys
-        lmh_setDevEui(_lw_devEUI);
-        lmh_setAppEui(_lw_appEUI);
-        lmh_setAppKey(_lw_appKey);
-        lmh_setNwkSKey(_lw_NwkSKey);
-        lmh_setAppSKey(_lw_AppSKey);
-        lmh_setDevAddr(_lw_DevAddr);
+        bool useOTAA;
+        {
+            YuboxLoRaWANLockGuard g(_mtx);
 
-        lmh_param_t lora_param_init = {
-            LORAWAN_ADR_ON,
-            LORAWAN_DEFAULT_DATARATE,
-            LORAWAN_PUBLIC_NETWORK,
-            //LORAWAN_PRIVAT_NETWORK,
-            JOINREQ_NBTRIALS,
-            LORAWAN_DEFAULT_TX_POWER,
-            LORAWAN_DUTYCYCLE_OFF
-        };
+            // Nueva generación de conexión: todo trabajo y evento previo se descarta
+            _wk_gen++;
+            memcpy(_wk_joinParams.devEUI, _lw_devEUI, sizeof(_lw_devEUI));
+            memcpy(_wk_joinParams.appEUI, _lw_appEUI, sizeof(_lw_appEUI));
+            memcpy(_wk_joinParams.appKey, _lw_appKey, sizeof(_lw_appKey));
+            _wk_joinParams.region = _lw_region;
+            _wk_joinParams.subband = _lw_subband;
+            _wk_txPending = false;
+            _wk_maxPayloadLen = 0;
+            _joinStatus = YBX_LW_JOIN_ONGOING;
+            _ev_activity = false;
+            _ev_joined = false;
+            _ev_txDone = false;
+            _ev_rxQueue.clear();
+            useOTAA = _lw_useOTAA;
+        }
 
-        log_d("Reseteando contadores de MAC...");
-        lmh_reset_mac();
-
-        log_d("Para esta unión a la red LoRaWAN %s se usará OTAA...", _lw_useOTAA ? "SÍ" : "NO");
-        uint32_t err_code = lmh_init(&_lora_callbacks, lora_param_init, _lw_useOTAA, CLASS_A, _lw_region);
-        if (err_code != 0) {
-            log_e("lmh_init failed - %d", err_code);
-            _joinfail_handler();
-        } else if (!lmh_setSubBandChannels(_lw_subband)) {
-            log_e("lmh_setSubBandChannels(%d) failed. Wrong sub band requested?", _lw_subband);
-            _joinfail_handler();
+        log_d("Para esta unión a la red LoRaWAN %s se usará OTAA...", useOTAA ? "SÍ" : "NO");
+        (void)useOTAA;
+        if (!_startWorker()) {
+            log_e("No se puede iniciar tarea de radio LoRaWAN");
+            {
+                YuboxLoRaWANLockGuard g(_mtx);
+                _joinStatus = YBX_LW_JOIN_FAILED;
+            }
+            _sendActivityEventJSON();
         } else {
             log_i("Starting join LoRaWAN network (region %s subband %d)...",
                 _getLoRaWANRegionName(_lw_region), _lw_subband);
-            lmh_join();
             _joinstart_handler();
         }
-    } else {
-        // En versión 2.0.0+ el proceso de IRQ se mueve a tarea separada
-        //Radio.IrqProcess();
     }
+
+    _processWorkerEvents();
+}
+
+void YuboxLoRaWANConfigClass::_processWorkerEvents(void)
+{
+    bool activity, joined, joinedNew, txDone, txOk, txConfirmed, txAck;
+    std::deque<_RxEvent> rxQueue;
+
+    {
+        YuboxLoRaWANLockGuard g(_mtx);
+
+        activity = _ev_activity; _ev_activity = false;
+        joined = _ev_joined; joinedNew = _ev_joinedNewSession; _ev_joined = false;
+        txDone = _ev_txDone; _ev_txDone = false;
+        txOk = _ev_txOk; txConfirmed = _ev_txConfirmed; txAck = _ev_txAck;
+        rxQueue.swap(_ev_rxQueue);
+    }
+
+    // Los manejadores siguientes envían por sí mismos el evento de actividad
+    if (joined) {
+        _join_handler(joinedNew);
+        activity = false;
+    }
+    while (!rxQueue.empty()) {
+        _RxEvent & ev = rxQueue.front();
+        _rx_handler(ev.data.data(), (uint8_t)ev.data.size(), ev.port);
+        rxQueue.pop_front();
+        activity = false;
+    }
+    if (txDone) {
+        _tx_result_handler(txOk, txConfirmed, txAck);
+        activity = false;
+    }
+
+    if (activity) _sendActivityEventJSON();
 }
 
 void YuboxLoRaWANConfigClass::_sendActivityEventJSON(void)
@@ -831,14 +1126,58 @@ void YuboxLoRaWANConfigClass::_joinstart_handler(void)
     _sendActivityEventJSON();
 }
 
-void YuboxLoRaWANConfigClass::_joinfail_handler(void)
-{
-    _sendActivityEventJSON();
-}
-
 bool YuboxLoRaWANConfigClass::isJoined(void)
 {
-    return (_lorahw_init && _lw_confExists && !_lw_needsInit && (LMH_SET == lmh_join_status_get()));
+    return (_lorahw_init && _lw_confExists && !_lw_needsInit && (YBX_LW_JOIN_SET == _getJoinStatus()));
+}
+
+bool YuboxLoRaWANConfigClass::_enqueueTX(uint8_t port, uint8_t * p, uint8_t n, bool is_txconfirmed, bool internal)
+{
+    YuboxLoRaWANLockGuard g(_mtx);
+
+    if (_wk_task == NULL || _wk_exit) return false;
+    if (_joinStatus != YBX_LW_JOIN_SET) return false;
+    if (port < RADIOLIB_LORAWAN_FPORT_PAYLOAD_MIN || port > RADIOLIB_LORAWAN_FPORT_PAYLOAD_MAX) {
+        log_w("Puerto LoRaWAN %u no válido para datos de aplicación", port);
+        return false;
+    }
+    if (_wk_txPending || _wk_txExecuting) {
+        log_d("Hay una transmisión LoRaWAN en curso, no se puede enviar todavía");
+        return false;
+    }
+    if (n > _wk_maxPayloadLen) {
+        log_d("Payload de %u bytes excede máximo actual de %u bytes", n, _wk_maxPayloadLen);
+        return false;
+    }
+
+    _wk_txPort = port;
+    _wk_txLen = (p != NULL) ? n : 0;
+    if (_wk_txLen > 0) memcpy(_wk_txBuf, p, _wk_txLen);
+    _wk_txConfirmed = is_txconfirmed;
+    _wk_txInternal = internal;
+    _wk_txPending = true;
+
+    // Se notifica con el candado tomado, así la tarea no puede terminar en medio
+    xTaskNotifyGive(_wk_task);
+    return true;
+}
+
+bool YuboxLoRaWANConfigClass::_registerTXFailure(void)
+{
+    uint32_t t = millis();
+    _ts_ultimoTX_FAIL = t;
+    if (_ts_errorAfterJoin == 0) _ts_errorAfterJoin = t;
+
+    if (t - _ts_errorAfterJoin >= YBX_LW_TX_ERROR_REJOIN_MS) {
+        log_w("No hay transmisión exitosa luego de timeout, se reintenta join...");
+        _ts_errorAfterJoin = 0;
+        _lw_needsInit = true;
+
+        // Destruir cualquier clave de sesión, porque debe volverse a negociar OTAA
+        if (!_lw_useOTAA) destroySessionKeys();
+        return true;
+    }
+    return false;
 }
 
 bool YuboxLoRaWANConfigClass::send(uint8_t app_port, uint8_t * p, uint8_t n, bool is_txconfirmed)
@@ -846,28 +1185,18 @@ bool YuboxLoRaWANConfigClass::send(uint8_t app_port, uint8_t * p, uint8_t n, boo
     if (!_lorahw_init) return false;
     if (!_lw_confExists || _lw_needsInit) return false;
 
-    if (lmh_join_status_get() != LMH_SET) return false;
+    if (_getJoinStatus() != YBX_LW_JOIN_SET) return false;
 
     if (p == NULL) n = 0;
-    lmh_app_data_t m_lora_app_data = {p, n, app_port, 0, 0};
 
-    lmh_error_status main_err = lmh_send(&m_lora_app_data, is_txconfirmed ? LMH_CONFIRMED_MSG : LMH_UNCONFIRMED_MSG);
+    // La transmisión real ocurre en la tarea de radio. El resultado se reporta luego
+    // a través de update(), igual que antes llegaba por callbacks de la biblioteca.
+    bool ok = _enqueueTX(app_port, p, n, is_txconfirmed, false);
 
-    _saveFrameCounters();
+    if (!ok) {
+        bool rejoin = _registerTXFailure();
 
-    if (main_err != LMH_SUCCESS) {
-        uint32_t t = millis();
-        _ts_ultimoTX_FAIL = t;
-        if (_ts_errorAfterJoin == 0) _ts_errorAfterJoin = t;
-
-        if (t - _ts_errorAfterJoin >= 90 * 1000) {
-            log_w("No hay transmisión exitosa luego de timeout, se reintenta join...");
-            _ts_errorAfterJoin = 0;
-            _lw_needsInit = true;
-
-            // Destruir cualquier clave de sesión, porque debe volverse a negociar OTAA
-            if (!_lw_useOTAA) destroySessionKeys();
-        } else if (p != NULL) {
+        if (!rejoin && p != NULL) {
             /**
              * NOTA: por Alex Villacís Lasso 2020/11/24
              * En caso de que falle el envío, probablemente es porque no se ha negociado
@@ -876,32 +1205,27 @@ bool YuboxLoRaWANConfigClass::send(uint8_t app_port, uint8_t * p, uint8_t n, boo
              * longitud cero, lo cual permite negociar un payload mayor según se reciba o no
              * en el gateway.
              */
-            m_lora_app_data.port = app_port;
-            m_lora_app_data.buffsize = 0;
-            lmh_error_status recv_err = lmh_send(&m_lora_app_data, LMH_UNCONFIRMED_MSG);
+            _enqueueTX(app_port, NULL, 0, false, true);
         }
     } else {
-        _ts_errorAfterJoin = 0;
-        _ts_ultimoTX_OK = millis();
-
         if (is_txconfirmed) {
             _tx_waiting_confirm = true;
-            _ts_confirmTX_start = _ts_ultimoTX_OK;
+            _ts_confirmTX_start = millis();
         }
     }
 
     _sendActivityEventJSON();
 
-    return (main_err == LMH_SUCCESS);
+    return ok;
 }
 
 yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onJoin(YuboxLoRaWAN_join_func_cb cbJ)
 {
   if (!cbJ) return 0;
 
+  YuboxLoRaWANLockGuard g(_mtx);
   YuboxLoRaWAN_rx_List_t n_evHandler;
   n_evHandler.event_type = YBX_LW_NETJOIN;
-  //n_evHandler.j_cb = NULL;
   n_evHandler.j_fcb = cbJ;
   cbRXList.push_back(n_evHandler);
   return n_evHandler.id;
@@ -909,6 +1233,7 @@ yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onJoin(YuboxLoRaWAN_join_func_c
 
 void YuboxLoRaWANConfigClass::removeJoin(yuboxlorawan_event_id_t id)
 {
+  YuboxLoRaWANLockGuard g(_mtx);
   for (auto i = 0; i < cbRXList.size(); i++) {
     YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
     if (entry.event_type == YBX_LW_NETJOIN && entry.id == id) cbRXList.erase(cbRXList.begin() + i);
@@ -919,9 +1244,9 @@ yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onRX(YuboxLoRaWAN_rx_func_cb cb
 {
   if (!cbRX) return 0;
 
+  YuboxLoRaWANLockGuard g(_mtx);
   YuboxLoRaWAN_rx_List_t n_evHandler;
   n_evHandler.event_type = YBX_LW_RX;
-  //n_evHandler.rx_cb = NULL;
   n_evHandler.rx_fcb = cbRX;
   cbRXList.push_back(n_evHandler);
   return n_evHandler.id;
@@ -929,6 +1254,7 @@ yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onRX(YuboxLoRaWAN_rx_func_cb cb
 
 void YuboxLoRaWANConfigClass::removeRX(yuboxlorawan_event_id_t id)
 {
+  YuboxLoRaWANLockGuard g(_mtx);
   for (auto i = 0; i < cbRXList.size(); i++) {
     YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
     if (entry.event_type == YBX_LW_RX && entry.id == id) cbRXList.erase(cbRXList.begin() + i);
@@ -939,9 +1265,9 @@ yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onTXDuty(YuboxLoRaWAN_txdutycha
 {
   if (!cb) return 0;
 
+  YuboxLoRaWANLockGuard g(_mtx);
   YuboxLoRaWAN_rx_List_t n_evHandler;
   n_evHandler.event_type = YBX_LW_TXDUTY_CHANGE;
-  //n_evHandler.txd_cb = NULL;
   n_evHandler.txd_fcb = cb;
   cbRXList.push_back(n_evHandler);
   return n_evHandler.id;
@@ -949,6 +1275,7 @@ yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onTXDuty(YuboxLoRaWAN_txdutycha
 
 void YuboxLoRaWANConfigClass::removeTXDuty(yuboxlorawan_event_id_t id)
 {
+  YuboxLoRaWANLockGuard g(_mtx);
   for (auto i = 0; i < cbRXList.size(); i++) {
     YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
     if (entry.event_type == YBX_LW_TXDUTY_CHANGE && entry.id == id) cbRXList.erase(cbRXList.begin() + i);
@@ -959,9 +1286,9 @@ yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onTXConfirm(YuboxLoRaWAN_txconf
 {
   if (!cb) return 0;
 
+  YuboxLoRaWANLockGuard g(_mtx);
   YuboxLoRaWAN_rx_List_t n_evHandler;
   n_evHandler.event_type = YBX_LW_TX_CONFIRM;
-  //n_evHandler.txc_cb = NULL;
   n_evHandler.txc_fcb = cb;
   cbRXList.push_back(n_evHandler);
   return n_evHandler.id;
@@ -969,74 +1296,37 @@ yuboxlorawan_event_id_t YuboxLoRaWANConfigClass::onTXConfirm(YuboxLoRaWAN_txconf
 
 void YuboxLoRaWANConfigClass::removeTXConfirm(yuboxlorawan_event_id_t id)
 {
+  YuboxLoRaWANLockGuard g(_mtx);
   for (auto i = 0; i < cbRXList.size(); i++) {
     YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
     if (entry.event_type == YBX_LW_TX_CONFIRM && entry.id == id) cbRXList.erase(cbRXList.begin() + i);
   }
 }
 
-void YuboxLoRaWANConfigClass::_join_handler(void)
+// Copia de la lista de callbacks, para invocarlos sin mantener el candado tomado
+static std::vector<YuboxLoRaWAN_rx_List_t> _copyCallbacks(SemaphoreHandle_t mtx, yuboxlorawan_event_t evtype)
 {
-    if (_lw_useOTAA) {
-        // Luego de negociar OTAA, se disponen de claves de sesión que deben ser guardadas
-        MibRequestConfirm_t mibReq;
+    std::vector<YuboxLoRaWAN_rx_List_t> l;
+    YuboxLoRaWANLockGuard g(mtx);
+    for (auto i = 0; i < cbRXList.size(); i++) {
+        if (cbRXList[i].event_type == evtype) l.push_back(cbRXList[i]);
+    }
+    return l;
+}
 
-        log_d("Claves de sesión negociadas luego de OTAA, se intenta recuperar y guardar...");
-
-        // Recuperar en memoria los parámetros negociados
-        memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
-        mibReq.Type = MIB_DEV_ADDR;
-        LoRaMacMibGetRequestConfirm(&mibReq);
-        _lw_DevAddr = mibReq.Param.DevAddr;
-
-        memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
-        mibReq.Type = MIB_NWK_SKEY;
-        LoRaMacMibGetRequestConfirm(&mibReq);
-        memcpy(_lw_NwkSKey, mibReq.Param.NwkSKey, sizeof(_lw_NwkSKey));
-
-        memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
-        mibReq.Type = MIB_APP_SKEY;
-        LoRaMacMibGetRequestConfirm(&mibReq);
-        memcpy(_lw_AppSKey, mibReq.Param.AppSKey, sizeof(_lw_AppSKey));
-
-        _lw_useOTAA = false;
-
-        // Guardar inmediatamente en NVRAM...
-        bool ok = true;
-        Preferences nvram;
-        nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
-
-        if (ok && !nvram.putBytes("NwkSKey", _lw_NwkSKey, sizeof(_lw_NwkSKey))) ok = false;
-        if (ok && !nvram.putBytes("AppSKey", _lw_AppSKey, sizeof(_lw_AppSKey))) ok = false;
-        if (ok && !nvram.putUInt("devaddr", _lw_DevAddr)) ok = false;
-
-        if (!ok) _destroySessionKeys(nvram);
-
-        if (ok) log_d("Claves de sesión negociadas por OTAA fueron guardadas");
+void YuboxLoRaWANConfigClass::_join_handler(bool newSession)
+{
+    _lw_useOTAA = false;
+    if (newSession) {
+        // Luego de negociar OTAA ya hay actividad downlink (el Join-Accept)
         _ts_lastDownlinkActivity = millis();
-    } else {
-        MibRequestConfirm_t mibReq;
-
-        log_d("Restaurando contadores UpLink=%u DownLink=%u", _lw_UpLinkCounter, _lw_DownLinkCounter);
-
-        memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
-        mibReq.Type = MIB_UPLINK_COUNTER;
-        mibReq.Param.UpLinkCounter = _lw_UpLinkCounter + 2;
-        LoRaMacMibSetRequestConfirm(&mibReq);
-
-        memset(&mibReq, 0, sizeof(MibRequestConfirm_t));
-        mibReq.Type = MIB_DOWNLINK_COUNTER;
-        mibReq.Param.DownLinkCounter = _lw_DownLinkCounter + 1;
-        LoRaMacMibSetRequestConfirm(&mibReq);
     }
 
     _sendActivityEventJSON();
 
-    for (auto i = 0; i < cbRXList.size(); i++) {
-        YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-        if (entry.event_type == YBX_LW_NETJOIN) {
-            entry.j_fcb();
-        }
+    auto l = _copyCallbacks(_mtx, YBX_LW_NETJOIN);
+    for (auto i = 0; i < l.size(); i++) {
+        l[i].j_fcb();
     }
 }
 
@@ -1046,31 +1336,44 @@ void YuboxLoRaWANConfigClass::_rx_handler(uint8_t * p, uint8_t n, uint8_t app_po
     _ts_ultimoRX = millis();
     _ts_lastDownlinkActivity = _ts_ultimoRX;
     if (_enable_all_ports || app_port == LORAWAN_APP_PORT) {
-        for (auto i = 0; i < cbRXList.size(); i++) {
-            YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-            if (entry.event_type == YBX_LW_RX) {
-                entry.rx_fcb(p, n);
-            }
+        auto l = _copyCallbacks(_mtx, YBX_LW_RX);
+        for (auto i = 0; i < l.size(); i++) {
+            l[i].rx_fcb(p, n);
         }
     }
 
     _sendActivityEventJSON();
-
-    _saveFrameCounters();
 }
 
 void YuboxLoRaWANConfigClass::_txdutychange_handler(void)
 {
-    for (auto i = 0; i < cbRXList.size(); i++) {
-        YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-        if (entry.event_type == YBX_LW_TXDUTY_CHANGE) {
-            entry.txd_fcb();
-        }
+    auto l = _copyCallbacks(_mtx, YBX_LW_TXDUTY_CHANGE);
+    for (auto i = 0; i < l.size(); i++) {
+        l[i].txd_fcb();
+    }
+}
+
+void YuboxLoRaWANConfigClass::_tx_result_handler(bool txOk, bool isConfirmed, bool ackOk)
+{
+    if (txOk) {
+        _ts_errorAfterJoin = 0;
+        _ts_ultimoTX_OK = millis();
+    } else {
+        _registerTXFailure();
+    }
+
+    if (isConfirmed) {
+        // Se reporta también el fallo de transmisión como fallo de confirmación
+        _tx_confirmed_result(ackOk);
+    } else {
+        _sendActivityEventJSON();
     }
 }
 
 void YuboxLoRaWANConfigClass::_tx_confirmed_result(bool r)
 {
+    log_v("RESULTADO DE CONFIRMED TX ES %s", r ? "OK": "FAIL");
+
     _tx_waiting_confirm = false;
     _ts_confirmTX_start = 0;
     if (r) {
@@ -1082,62 +1385,541 @@ void YuboxLoRaWANConfigClass::_tx_confirmed_result(bool r)
 
     _sendActivityEventJSON();
 
-    for (auto i = 0; i < cbRXList.size(); i++) {
-        YuboxLoRaWAN_rx_List_t entry = cbRXList[i];
-        if (entry.event_type == YBX_LW_TX_CONFIRM) {
-            entry.txc_fcb(r);
-        }
+    auto l = _copyCallbacks(_mtx, YBX_LW_TX_CONFIRM);
+    for (auto i = 0; i < l.size(); i++) {
+        l[i].txc_fcb(r);
     }
 }
 
-static void lorawan_confirm_class_handler(DeviceClass_t Class)
-{
-    log_i("switch to class %c done", "ABC"[Class]);
+/* ======================================================================== */
+/* Tarea de radio. Es la única que accede al radio y al nodo LoRaWAN de      */
+/* RadioLib, cuyo API es síncrono (join y sendReceive bloquean segundos).    */
+/* ======================================================================== */
 
-    // Informs the server that switch has occurred ASAP
-    lmh_app_data_t m_lora_app_data = {NULL, 0, 0, 0, 0};
-    m_lora_app_data.buffsize = 0;
-    m_lora_app_data.port = LORAWAN_APP_PORT;
-    lmh_send(&m_lora_app_data, LMH_UNCONFIRMED_MSG);
+bool YuboxLoRaWANConfigClass::_startWorker(void)
+{
+    YuboxLoRaWANLockGuard g(_mtx);
+
+    if (_wk_task != NULL) {
+        // Tarea ya existe. Si estaba por terminar, se cancela la terminación.
+        _wk_exit = false;
+        xTaskNotifyGive(_wk_task);
+        return true;
+    }
+
+    _wk_exit = false;
+    BaseType_t r = xTaskCreate(_workerTaskEntry, YBX_LW_TASK_NAME, YBX_LW_TASK_STACK, this, YBX_LW_TASK_PRIO, &_wk_task);
+    if (r != pdPASS) {
+        _wk_task = NULL;
+        return false;
+    }
+
+    // La tarea recién creada espera una notificación antes de revisar si hay
+    // una petición de conexión pendiente. La notificación queda guardada aunque
+    // la tarea todavía no haya llegado a esperarla.
+    xTaskNotifyGive(_wk_task);
+    log_d("Tarea de radio LoRaWAN iniciada");
+    return true;
 }
 
-static void lorawan_has_joined_handler(void)
+void YuboxLoRaWANConfigClass::_stopWorker(void)
 {
-    lmh_class_request(CLASS_A);
-    YuboxLoRaWANConf._join_handler();
+    YuboxLoRaWANLockGuard g(_mtx);
+
+    // La tarea termina por sí misma luego de completar la operación de radio en curso
+    if (_wk_task != NULL) {
+        _wk_exit = true;
+        xTaskNotifyGive(_wk_task);
+    }
 }
 
-static void lorawan_join_failed_handler(void)
+void YuboxLoRaWANConfigClass::_workerTaskEntry(void * p)
 {
-    log_w("OVER_THE_AIR_ACTIVATION failed! Retrying...");
-    YuboxLoRaWANConf._joinfail_handler();
-    lmh_join();
-    YuboxLoRaWANConf._joinstart_handler();
+    ((YuboxLoRaWANConfigClass *)p)->_workerLoop();
+    vTaskDelete(NULL);
 }
 
-static void lorawan_rx_handler(lmh_app_data_t *app_data)
+void YuboxLoRaWANConfigClass::_workerLoop(void)
 {
-    switch (app_data->port) {
-    case 3: // Port 3 switches the class
-        if (app_data->buffsize == 1) {
-            switch (app_data->buffer[0]) {
-            case 0: lmh_class_request(CLASS_A); break;
-            case 1: lmh_class_request(CLASS_B); break;
-            case 2: lmh_class_request(CLASS_C); break;
-            default: break;
+    _WorkerCtx * pCtx = new _WorkerCtx;
+    _WorkerCtx & ctx = *pCtx;
+
+    ctx.st = _WorkerCtx::WK_IDLE;
+    ctx.gen = 0;
+    ctx.sessionEpoch = 0;
+    ctx.credEpoch = 0;
+    memset(&ctx.params, 0, sizeof(ctx.params));
+    ctx.node = NULL;
+    ctx.nextJoinTs = 0;
+    ctx.joinFails = 0;
+    ctx.fcntLastFullSave = 0;
+    ctx.fcntLastSaved = 0;
+    memset(ctx.lastNonces, 0, sizeof(ctx.lastNonces));
+    ctx.classAckPending = false;
+    ctx.emptyTxPending = false;
+    ctx.emptyTxPort = LORAWAN_APP_PORT;
+
+    while (true) {
+        // Calcular cuánto se puede esperar una notificación antes de tener trabajo propio
+        TickType_t wait = portMAX_DELAY;
+        if (ctx.st == _WorkerCtx::WK_JOINING) {
+            int32_t dt = (int32_t)(ctx.nextJoinTs - millis());
+            wait = (dt > 0) ? pdMS_TO_TICKS(dt) : 0;
+        } else if (ctx.st == _WorkerCtx::WK_JOINED) {
+            if (ctx.classAckPending || ctx.emptyTxPending) {
+                wait = 0;
+            } else if (ctx.node->getClass() == RADIOLIB_LORAWAN_CLASS_C) {
+                wait = pdMS_TO_TICKS(YBX_LW_CLASSC_POLL_MS);
             }
         }
-        break;
-    default:
-        YuboxLoRaWANConf._rx_handler(app_data->buffer, app_data->buffsize, app_data->port);
-        break;
+        ulTaskNotifyTake(pdTRUE, wait);
+
+        if (_wkCheckExit(ctx)) break;
+
+        bool newGen = false;
+        bool haveTx = false;
+        uint8_t txPort = LORAWAN_APP_PORT, txLen = 0;
+        bool txConfirmed = false, txInternal = false;
+        {
+            YuboxLoRaWANLockGuard g(_mtx);
+
+            if (_wk_gen != ctx.gen) {
+                ctx.gen = _wk_gen;
+                ctx.params = _wk_joinParams;
+                ctx.sessionEpoch = _sessionEpoch;
+                ctx.credEpoch = _credEpoch;
+                newGen = true;
+            } else if (ctx.st == _WorkerCtx::WK_JOINED && _wk_txPending) {
+                txPort = _wk_txPort;
+                txLen = _wk_txLen;
+                memcpy(ctx.txBuf, _wk_txBuf, txLen);
+                txConfirmed = _wk_txConfirmed;
+                txInternal = _wk_txInternal;
+                _wk_txPending = false;
+                _wk_txExecuting = true;
+                haveTx = true;
+            }
+        }
+
+        if (newGen) {
+            _wkStartSession(ctx);
+            continue;
+        }
+
+        if (ctx.st == _WorkerCtx::WK_JOINING) {
+            if ((int32_t)(millis() - ctx.nextJoinTs) >= 0) _wkJoinAttempt(ctx);
+            continue;
+        }
+
+        if (ctx.st != _WorkerCtx::WK_JOINED) continue;
+
+        if (haveTx) {
+            _wkUplink(ctx, txPort, ctx.txBuf, txLen, txConfirmed, txInternal);
+            YuboxLoRaWANLockGuard g(_mtx);
+            _wk_txExecuting = false;
+            continue;
+        }
+
+        if (ctx.classAckPending) {
+            // Informar a la red lo más pronto posible que el cambio de clase ocurrió
+            ctx.classAckPending = false;
+            _wkUplink(ctx, LORAWAN_APP_PORT, NULL, 0, false, true);
+            continue;
+        }
+
+        if (ctx.emptyTxPending) {
+            ctx.emptyTxPending = false;
+            _wkUplink(ctx, ctx.emptyTxPort, NULL, 0, false, true);
+            continue;
+        }
+
+        _wkPollClassC(ctx);
+    }
+
+    delete pCtx;
+    log_d("Tarea de radio LoRaWAN terminada");
+}
+
+bool YuboxLoRaWANConfigClass::_wkCheckExit(_WorkerCtx & ctx)
+{
+    {
+        YuboxLoRaWANLockGuard g(_mtx);
+        if (!_wk_exit) return false;
+    }
+
+    // Liberar el radio ANTES de confirmar la terminación, para que una nueva tarea
+    // no pueda tocar el radio mientras éste se libera.
+    if (ctx.node != NULL) {
+        delete ctx.node;
+        ctx.node = NULL;
+    }
+    _chipsetSleepRadio();
+    ctx.st = _WorkerCtx::WK_IDLE;
+    ctx.gen = 0;
+
+    YuboxLoRaWANLockGuard g(_mtx);
+    if (_wk_exit) {
+        _wk_exit = false;
+        _wk_task = NULL;
+        return true;
+    }
+
+    // Se pidió reiniciar LoRaWAN mientras se terminaba la tarea, se continúa
+    return false;
+}
+
+void YuboxLoRaWANConfigClass::_wkStartSession(_WorkerCtx & ctx)
+{
+    if (ctx.node != NULL) {
+        delete ctx.node;
+        ctx.node = NULL;
+    }
+    ctx.st = _WorkerCtx::WK_IDLE;
+    ctx.joinFails = 0;
+    ctx.classAckPending = false;
+    ctx.emptyTxPending = false;
+
+    if (!_isValidLoRaWANRegion(ctx.params.region)) {
+        log_e("Región LoRaWAN %u no soportada", ctx.params.region);
+        _wkSetJoinStatus(ctx, YBX_LW_JOIN_FAILED);
+        return;
+    }
+
+    ctx.node = new YuboxLoRaWANNode(_phy, _ybx_lw_regions[ctx.params.region].band, ctx.params.subband);
+    ctx.node->setADR(true);
+    ctx.node->setDutyCycle(false);
+
+    // LoRaWAN 1.0.x: sin NwkKey, sólo AppKey (igual que SX126x-Arduino)
+    int16_t state = ctx.node->beginOTAA(_eui2u64(ctx.params.appEUI), _eui2u64(ctx.params.devEUI), NULL, ctx.params.appKey);
+    if (state != RADIOLIB_ERR_NONE) {
+        log_e("Fallo al configurar credenciales OTAA - %d", state);
+        _wkSetJoinStatus(ctx, YBX_LW_JOIN_FAILED);
+        return;
+    }
+
+    // Recuperar nonces y, si es posible, la sesión completa
+    bool restored = false;
+    uint32_t savedFCntUp = 0;
+    memset(ctx.lastNonces, 0, sizeof(ctx.lastNonces));
+    {
+        Preferences nvram;
+        if (nvram.begin(_ns_nvram_yuboxframework_lorawan, true)) {
+            if (nvram.getBytesLength(YBX_LW_NVKEY_NONCES) == RADIOLIB_LORAWAN_NONCES_BUF_SIZE) {
+                uint8_t nonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
+                nvram.getBytes(YBX_LW_NVKEY_NONCES, nonces, sizeof(nonces));
+                state = ctx.node->setBufferNonces(nonces);
+                if (state != RADIOLIB_ERR_NONE) {
+                    log_w("Nonces LoRaWAN guardados no corresponden a configuración actual (%d), se descartan", state);
+                } else {
+                    memcpy(ctx.lastNonces, nonces, sizeof(nonces));
+
+                    if (nvram.getBytesLength(YBX_LW_NVKEY_SESSION) == RADIOLIB_LORAWAN_SESSION_BUF_SIZE) {
+                        uint8_t * session = new uint8_t[RADIOLIB_LORAWAN_SESSION_BUF_SIZE];
+                        nvram.getBytes(YBX_LW_NVKEY_SESSION, session, RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
+                        state = ctx.node->setBufferSession(session);
+                        delete[] session;
+                        if (state != RADIOLIB_ERR_NONE) {
+                            log_w("Sesión LoRaWAN guardada no es válida (%d), se descarta", state);
+                        } else {
+                            state = ctx.node->activateOTAA();
+                            if (state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
+                                restored = true;
+                            } else {
+                                log_w("No se puede activar sesión LoRaWAN guardada (%d)", state);
+                            }
+                        }
+                    }
+                    savedFCntUp = nvram.getUInt(YBX_LW_NVKEY_FCNTUP, 0);
+                }
+            }
+            nvram.end();
+        }
+    }
+
+    if (restored) {
+        // El contador de uplink más reciente puede estar guardado por separado
+        uint32_t fcnt = ctx.node->getNextFCntUp();
+        if (savedFCntUp > fcnt) fcnt = savedFCntUp;
+        ctx.node->advanceFCntUp(fcnt + YBX_LW_FCNTUP_RESTORE_MARGIN);
+        ctx.fcntLastFullSave = ctx.node->getNextFCntUp();
+        ctx.fcntLastSaved = 0;
+
+        ctx.node->setClass(RADIOLIB_LORAWAN_CLASS_A);
+        _wkUpdateMaxPayload(ctx);
+        _chipsetSleepRadio();
+
+        log_i("Sesión LoRaWAN restaurada desde NVRAM (DevAddr %08x, siguiente FCntUp %u)",
+            ctx.node->getDevAddr(), ctx.node->getNextFCntUp());
+        ctx.st = _WorkerCtx::WK_JOINED;
+        _wkPostJoined(ctx, false);
+        return;
+    }
+
+    // Se requiere negociar OTAA. Datarate inicial igual al usado con SX126x-Arduino.
+    state = ctx.node->setDatarate(YBX_LW_DEFAULT_DATARATE);
+    if (state != RADIOLIB_ERR_NONE) {
+        log_w("No se puede usar datarate inicial %u (%d), se usa el de RadioLib", YBX_LW_DEFAULT_DATARATE, state);
+    }
+
+    ctx.st = _WorkerCtx::WK_JOINING;
+    ctx.nextJoinTs = millis();
+    _wkSetJoinStatus(ctx, YBX_LW_JOIN_ONGOING);
+}
+
+void YuboxLoRaWANConfigClass::_wkJoinAttempt(_WorkerCtx & ctx)
+{
+    _wkSetJoinStatus(ctx, YBX_LW_JOIN_ONGOING);
+
+    LoRaWANJoinEvent_t joinEv;
+    int16_t state = ctx.node->activateOTAA(&joinEv);
+
+    // El DevNonce cambia con cada Join-Request enviado, y debe persistir
+    _wkSaveNonces(ctx);
+
+    if (state == RADIOLIB_LORAWAN_NEW_SESSION) {
+        log_i("Unión OTAA exitosa a red LoRaWAN (DevAddr %08x)", ctx.node->getDevAddr());
+        ctx.node->setClass(RADIOLIB_LORAWAN_CLASS_A);
+        ctx.joinFails = 0;
+        ctx.fcntLastSaved = 0;
+        _wkSaveSession(ctx, true);
+        _wkUpdateMaxPayload(ctx);
+        _chipsetSleepRadio();
+        log_v("Espacio libre en pila de tarea de radio: %u", uxTaskGetStackHighWaterMark(NULL));
+
+        ctx.st = _WorkerCtx::WK_JOINED;
+        _wkPostJoined(ctx, true);
+        return;
+    }
+
+    _chipsetSleepRadio();
+    ctx.joinFails++;
+    log_d("Intento de join OTAA %u falló (%d)", ctx.joinFails, state);
+
+    uint32_t delayMs = 0;
+    if (state != RADIOLIB_ERR_NO_JOIN_ACCEPT && state != RADIOLIB_ERR_MIC_MISMATCH && state != RADIOLIB_ERR_DOWNLINK_MALFORMED) {
+        // Error de radio o de configuración, no tiene sentido reintentar de inmediato
+        delayMs = YBX_LW_JOIN_ERROR_DELAY_MS;
+    }
+    if (ctx.joinFails % JOINREQ_NBTRIALS == 0) {
+        log_w("OVER_THE_AIR_ACTIVATION failed! Retrying...");
+        _wkSetJoinStatus(ctx, YBX_LW_JOIN_FAILED);
+        if (delayMs < YBX_LW_JOIN_RETRY_DELAY_MS) delayMs = YBX_LW_JOIN_RETRY_DELAY_MS;
+    }
+    ctx.nextJoinTs = millis() + delayMs;
+}
+
+void YuboxLoRaWANConfigClass::_wkUplink(_WorkerCtx & ctx, uint8_t port, const uint8_t * p, uint8_t n, bool is_txconfirmed, bool internal)
+{
+    static const uint8_t emptyPayload[1] = { 0 };
+    if (p == NULL) {
+        p = emptyPayload;
+        n = 0;
+    }
+
+    // Para uplinks confirmados se fuerzan retransmisiones con el mismo contador de trama
+    uint8_t prevNbTrans = ctx.node->getNbTrans();
+    uint8_t confTrials = 0;
+    if (is_txconfirmed) {
+        confTrials = (ctx.params.region == YBX_LW_REGION_AS923) ? 1 : YBX_LW_CONFIRMED_NBTRIALS;
+        if (confTrials > prevNbTrans) {
+            ctx.node->setNbTrans(confTrials);
+        } else {
+            confTrials = 0;
+        }
+    }
+
+    uint8_t classBefore = ctx.node->getClass();
+    size_t lenDown = 0;
+    LoRaWANEvent_t evUp, evDown;
+    memset(&evUp, 0, sizeof(evUp));
+    memset(&evDown, 0, sizeof(evDown));
+
+    int16_t state = ctx.node->sendReceive(p, n, port, ctx.downBuf, &lenDown, is_txconfirmed, &evUp, &evDown);
+
+    // Restaurar retransmisiones, salvo que la red las haya cambiado durante el intercambio
+    if (confTrials != 0 && ctx.node->getNbTrans() == confTrials) ctx.node->setNbTrans(prevNbTrans);
+
+    bool txOk = (state >= RADIOLIB_ERR_NONE);
+    bool downlink = (state > RADIOLIB_ERR_NONE);
+    bool ackOk = (is_txconfirmed && downlink && evDown.confirming);
+
+    if (!txOk) {
+        log_w("Fallo en transmisión LoRaWAN (%d)", state);
+    } else {
+        log_d("Uplink LoRaWAN enviado (FCnt %u, %u bytes, puerto %u, DR %u)%s",
+            evUp.fCnt, n, port, evUp.datarate, downlink ? ", downlink recibido" : "");
+    }
+
+    bool classChanged = false;
+    if (downlink && evDown.fPort != 0 && !evDown.multicast) {
+        classChanged = _wkHandleDownlink(ctx, evDown.fPort, ctx.downBuf, lenDown);
+    }
+
+    bool fullSave = (downlink || classChanged || classBefore != ctx.node->getClass()
+        || (ctx.node->getNextFCntUp() - ctx.fcntLastFullSave >= YBX_LW_SESSION_FULLSAVE_UPLINKS));
+    _wkSaveSession(ctx, fullSave);
+    _wkUpdateMaxPayload(ctx);
+
+    if (!internal) {
+        _wkPostTXResult(ctx, txOk, is_txconfirmed, ackOk);
+
+        // Ver NOTA en send() sobre negociación de payload mayor
+        if (state == RADIOLIB_ERR_PACKET_TOO_LONG) {
+            ctx.emptyTxPending = true;
+            ctx.emptyTxPort = port;
+        }
+    }
+
+    if (ctx.node->getClass() == RADIOLIB_LORAWAN_CLASS_A) _chipsetSleepRadio();
+    log_v("Espacio libre en pila de tarea de radio: %u", uxTaskGetStackHighWaterMark(NULL));
+}
+
+void YuboxLoRaWANConfigClass::_wkPollClassC(_WorkerCtx & ctx)
+{
+    if (ctx.node->getClass() != RADIOLIB_LORAWAN_CLASS_C) return;
+
+    size_t lenDown = 0;
+    LoRaWANEvent_t evDown;
+    memset(&evDown, 0, sizeof(evDown));
+    int16_t state = ctx.node->getDownlinkClassC(ctx.downBuf, &lenDown, &evDown);
+    if (state > RADIOLIB_ERR_NONE) {
+        if (evDown.fPort != 0 && !evDown.multicast) {
+            _wkHandleDownlink(ctx, evDown.fPort, ctx.downBuf, lenDown);
+        }
+        _wkSaveSession(ctx, true);
+        _wkUpdateMaxPayload(ctx);
+        if (ctx.node->getClass() == RADIOLIB_LORAWAN_CLASS_A) _chipsetSleepRadio();
+    } else if (state < RADIOLIB_ERR_NONE) {
+        log_d("Error al recibir downlink en clase C (%d)", state);
     }
 }
 
-static void lorawan_confirmed_tx_result(bool result)
+bool YuboxLoRaWANConfigClass::_wkHandleDownlink(_WorkerCtx & ctx, uint8_t port, const uint8_t * p, size_t n)
 {
-    log_v("RESULTADO DE CONFIRMED TX ES %s", result ? "OK": "FAIL");
-    YuboxLoRaWANConf._tx_confirmed_result(result);
+    // Port 3 switches the class
+    if (port == 3) {
+        if (n != 1) return false;
+
+        uint8_t newClass;
+        switch (p[0]) {
+        case 0: newClass = RADIOLIB_LORAWAN_CLASS_A; break;
+        case 1: newClass = RADIOLIB_LORAWAN_CLASS_B; break;
+        case 2: newClass = RADIOLIB_LORAWAN_CLASS_C; break;
+        default: return false;
+        }
+        int16_t state = ctx.node->setClass(newClass);
+        if (state != RADIOLIB_ERR_NONE) {
+            log_w("No se puede cambiar a clase %c (%d)", "ABC"[p[0]], state);
+            return false;
+        }
+        log_i("switch to class %c done", "ABC"[p[0]]);
+        ctx.classAckPending = true;
+        return true;
+    }
+
+    _wkPostRX(ctx, port, p, n);
+    return false;
+}
+
+void YuboxLoRaWANConfigClass::_wkSaveNonces(_WorkerCtx & ctx)
+{
+    uint8_t * nonces = ctx.node->getBufferNonces();
+    if (0 == memcmp(nonces, ctx.lastNonces, RADIOLIB_LORAWAN_NONCES_BUF_SIZE)) return;
+
+    YuboxLoRaWANLockGuard g(_mtx);
+
+    // Si las credenciales se borraron o cambiaron, estos nonces ya no valen
+    if (ctx.credEpoch != _credEpoch) return;
+
+    Preferences nvram;
+    nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+    if (nvram.putBytes(YBX_LW_NVKEY_NONCES, nonces, RADIOLIB_LORAWAN_NONCES_BUF_SIZE) == RADIOLIB_LORAWAN_NONCES_BUF_SIZE) {
+        memcpy(ctx.lastNonces, nonces, RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+    } else {
+        log_e("No se pueden guardar nonces LoRaWAN");
+    }
+    nvram.end();
+}
+
+void YuboxLoRaWANConfigClass::_wkSaveSession(_WorkerCtx & ctx, bool full)
+{
+    uint32_t fcnt = ctx.node->getNextFCntUp();
+    if (!full && fcnt == ctx.fcntLastSaved) return;
+
+    YuboxLoRaWANLockGuard g(_mtx);
+
+    // Si la sesión se descartó o hay una conexión nueva, no se debe resucitar en NVRAM
+    if (ctx.gen != _wk_gen || ctx.sessionEpoch != _sessionEpoch) return;
+
+    Preferences nvram;
+    nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
+    if (full) {
+        uint8_t * session = ctx.node->getBufferSession();
+        // El contador separado se reescribe también, para que nunca quede un valor de
+        // una sesión anterior que adelante indebidamente el contador al restaurar.
+        if (nvram.putBytes(YBX_LW_NVKEY_SESSION, session, RADIOLIB_LORAWAN_SESSION_BUF_SIZE) == RADIOLIB_LORAWAN_SESSION_BUF_SIZE
+            && nvram.putUInt(YBX_LW_NVKEY_FCNTUP, fcnt)) {
+            log_v("Sesión LoRaWAN guardada (siguiente FCntUp %u)", fcnt);
+            ctx.fcntLastFullSave = fcnt;
+            ctx.fcntLastSaved = fcnt;
+        } else {
+            log_e("No se puede guardar sesión LoRaWAN");
+        }
+    } else {
+        if (nvram.putUInt(YBX_LW_NVKEY_FCNTUP, fcnt)) {
+            log_v("Contador uplink LoRaWAN guardado (siguiente FCntUp %u)", fcnt);
+            ctx.fcntLastSaved = fcnt;
+        } else {
+            log_e("No se puede guardar contador uplink LoRaWAN");
+        }
+    }
+    nvram.end();
+}
+
+void YuboxLoRaWANConfigClass::_wkUpdateMaxPayload(_WorkerCtx & ctx)
+{
+    uint8_t m = ctx.node->getMaxPayloadLen();
+
+    YuboxLoRaWANLockGuard g(_mtx);
+    if (ctx.gen == _wk_gen) _wk_maxPayloadLen = m;
+}
+
+void YuboxLoRaWANConfigClass::_wkSetJoinStatus(_WorkerCtx & ctx, uint8_t s)
+{
+    YuboxLoRaWANLockGuard g(_mtx);
+    if (ctx.gen != _wk_gen || _joinStatus == s) return;
+    _joinStatus = s;
+    _ev_activity = true;
+}
+
+void YuboxLoRaWANConfigClass::_wkPostJoined(_WorkerCtx & ctx, bool newSession)
+{
+    YuboxLoRaWANLockGuard g(_mtx);
+    if (ctx.gen != _wk_gen) return;
+    _joinStatus = YBX_LW_JOIN_SET;
+    _ev_joined = true;
+    _ev_joinedNewSession = newSession;
+}
+
+void YuboxLoRaWANConfigClass::_wkPostRX(_WorkerCtx & ctx, uint8_t port, const uint8_t * p, size_t n)
+{
+    YuboxLoRaWANLockGuard g(_mtx);
+    if (ctx.gen != _wk_gen) return;
+
+    _RxEvent ev;
+    ev.port = port;
+    ev.data.assign(p, p + n);
+    _ev_rxQueue.push_back(ev);
+}
+
+void YuboxLoRaWANConfigClass::_wkPostTXResult(_WorkerCtx & ctx, bool txOk, bool isConfirmed, bool ackOk)
+{
+    YuboxLoRaWANLockGuard g(_mtx);
+    if (ctx.gen != _wk_gen) return;
+    _ev_txDone = true;
+    _ev_txOk = txOk;
+    _ev_txConfirmed = isConfirmed;
+    _ev_txAck = ackOk;
 }
 
 YuboxLoRaWANConfigClass YuboxLoRaWANConf;
