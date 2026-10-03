@@ -389,8 +389,59 @@ void YuboxLoRaWANConfigClass::_removeLegacySessionKeys(void)
 }
 
 /* ======================================================================== */
+/* Selección de chipset de radio en tiempo de compilación                    */
+/*                                                                          */
+/* - YUBOX_LORAWAN_CHIPSET_SX1262: chipset SX1262. Es el chipset por omisión */
+/*   si no se define ninguna de las dos macros.                              */
+/* - YUBOX_LORAWAN_CHIPSET_LR1121: chipset LR1121 (familia LR11x0).          */
+/*                                                                          */
+/* Las macros deben definirse para toda la compilación, por ejemplo con      */
+/* ARDUINO_BUILD_EXTRA_FLAGS=-DYUBOX_LORAWAN_CHIPSET_LR1121 en el Makefile   */
+/* del proyecto, o en el archivo build_opt.h del proyecto.                   */
+/* ======================================================================== */
+
+#if defined(YUBOX_LORAWAN_CHIPSET_SX1262) && defined(YUBOX_LORAWAN_CHIPSET_LR1121)
+#error Sólo se puede elegir uno de YUBOX_LORAWAN_CHIPSET_SX1262 o YUBOX_LORAWAN_CHIPSET_LR1121
+#endif
+
+// Los #warning siguientes permiten verificar en la salida de compilación cuál
+// chipset quedó realmente seleccionado.
+#if defined(YUBOX_LORAWAN_CHIPSET_LR1121)
+#warning YUBOX LoRaWAN: chipset seleccionado LR1121 (YUBOX_LORAWAN_CHIPSET_LR1121)
+#elif defined(YUBOX_LORAWAN_CHIPSET_SX1262)
+#warning YUBOX LoRaWAN: chipset seleccionado SX1262 (YUBOX_LORAWAN_CHIPSET_SX1262)
+#else
+#warning YUBOX LoRaWAN: chipset seleccionado SX1262 (por omision, sin macro de chipset)
+#define YUBOX_LORAWAN_CHIPSET_SX1262
+#endif
+
+/* ======================================================================== */
 /* [PLACA] Pines de conexión entre ESP32 y el chip de radio                  */
 /* ======================================================================== */
+
+#if defined(YUBOX_LORAWAN_CHIPSET_LR1121)
+
+// ESP32 - LR1121 pin configuration. Por ahora sólo se soporta la placa
+// Yubox Industrial Mini (ESP32-S3 con módulo Wio-LR1121).
+#ifdef YUBOX_HELTEC_WIFI_LORA_V3
+#error La placa Heltec Wifi LoRa v3 usa el chipset SX1262, no LR1121!
+#endif
+
+#if CONFIG_IDF_TARGET_ESP32S3
+const int PIN_LORA_NSS      = SS;   // LORA SPI CS
+const int PIN_LORA_SCLK     = SCK;  // LORA SPI CLK
+const int PIN_LORA_MISO     = MISO; // LORA SPI MISO
+const int PIN_LORA_MOSI     = MOSI; // LORA SPI MOSI
+const int PIN_LORA_RESET    = 17;   // LORA RESET
+const int PIN_LORA_BUSY     = 18;   // LORA SPI BUSY
+const int PIN_LORA_IRQ      =  8;   // LORA DIO9
+// El conmutador de antena no usa pines del ESP32, sino las salidas DIO5 y DIO6
+// del propio LR1121. Ver tabla de conmutador en la sección del chipset.
+#else
+#error Undefined LORA pins for target! (LR1121 sólo está soportado en ESP32-S3)
+#endif
+
+#else   // YUBOX_LORAWAN_CHIPSET_SX1262
 
 #ifdef YUBOX_HELTEC_WIFI_LORA_V3
 
@@ -403,7 +454,7 @@ const int PIN_LORA_MOSI     = 10;   // LORA SPI MOSI
 
 const int PIN_LORA_RESET    = 12;   // LORA RESET
 const int PIN_LORA_BUSY     = 13;   // LORA SPI BUSY
-const int PIN_LORA_DIO_1    = 14;   // LORA DIO_1
+const int PIN_LORA_IRQ      = 14;   // LORA DIO_1
 const int RADIO_TXEN        = -1;   // LORA ANTENNA TX ENABLE
 const int RADIO_RXEN        = -1;   // LORA ANTENNA RX ENABLE
 
@@ -417,20 +468,20 @@ const int PIN_LORA_MOSI     = MOSI; // LORA SPI MOSI
 #if CONFIG_IDF_TARGET_ESP32
 const int PIN_LORA_RESET    = 33;   // LORA RESET
 const int PIN_LORA_BUSY     = 34;   // LORA SPI BUSY
-const int PIN_LORA_DIO_1    = 39;   // LORA DIO_1
+const int PIN_LORA_IRQ      = 39;   // LORA DIO_1
 const int RADIO_TXEN        = 26;   // LORA ANTENNA TX ENABLE
 const int RADIO_RXEN        = 27;   // LORA ANTENNA RX ENABLE
 #elif CONFIG_IDF_TARGET_ESP32S2
 const int PIN_LORA_RESET    = 17;   // LORA RESET
 const int PIN_LORA_BUSY     = 18;   // LORA SPI BUSY
-const int PIN_LORA_DIO_1    =  8;   // LORA DIO_1
+const int PIN_LORA_IRQ      =  8;   // LORA DIO_1
 const int RADIO_TXEN        = 16;   // LORA ANTENNA TX ENABLE
 const int RADIO_RXEN        = 15;   // LORA ANTENNA RX ENABLE
 
 #elif CONFIG_IDF_TARGET_ESP32S3
 const int PIN_LORA_RESET    = 17;   // LORA RESET
 const int PIN_LORA_BUSY     = 18;   // LORA SPI BUSY
-const int PIN_LORA_DIO_1    =  8;   // LORA DIO_1
+const int PIN_LORA_IRQ      =  8;   // LORA DIO_1
 const int RADIO_TXEN        = 16;   // LORA ANTENNA TX ENABLE
 const int RADIO_RXEN        = 15;   // LORA ANTENNA RX ENABLE
 #else
@@ -439,16 +490,36 @@ const int RADIO_RXEN        = 15;   // LORA ANTENNA RX ENABLE
 
 #endif
 
+#endif  // YUBOX_LORAWAN_CHIPSET_xxx
+
 // Bus SPI propio para el radio. Se usa el bus por omisión de SPIClass, igual
 // que SX126x-Arduino, para no interferir con el objeto global SPI.
 static SPIClass * _ybx_lw_spi = NULL;
 static Module * _ybx_lw_module = NULL;
 
+// Crear (una sola vez) el bus SPI y el módulo RadioLib, comunes a todos los chipsets
+static Module * _ybx_lw_getModule(void)
+{
+    if (_ybx_lw_spi == NULL) {
+        _ybx_lw_spi = new SPIClass();
+        _ybx_lw_spi->begin(PIN_LORA_SCLK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_NSS);
+    }
+    if (_ybx_lw_module == NULL) {
+        _ybx_lw_module = new Module(PIN_LORA_NSS, PIN_LORA_IRQ, PIN_LORA_RESET, PIN_LORA_BUSY, *_ybx_lw_spi);
+    }
+    return _ybx_lw_module;
+}
+
+/*
+ * Las secciones siguientes son las únicas específicas del chip de radio. Cada
+ * una crea el objeto de radio, lo configura, lo duerme y lo nombra. El resto
+ * del código usa PhysicalLayer y LoRaWANNode.
+ */
+
+#if defined(YUBOX_LORAWAN_CHIPSET_SX1262)
+
 /* ======================================================================== */
 /* [CHIPSET SX1262] Inicio de la sección específica del chip de radio        */
-/* Para migrar a otro chipset (p.ej. LR1121), sólo debería reemplazarse      */
-/* esta sección: crear el objeto de radio, configurarlo, dormirlo y          */
-/* nombrarlo. El resto del código usa PhysicalLayer y LoRaWANNode.           */
 /* ======================================================================== */
 
 // Configuración idéntica a la usada con SX126x-Arduino: TCXO controlado por DIO3
@@ -463,18 +534,14 @@ bool YuboxLoRaWANConfigClass::_chipsetInitRadio(void)
 {
     if (_phy != NULL) return true;
 
-    if (_ybx_lw_spi == NULL) {
-        _ybx_lw_spi = new SPIClass();
-        _ybx_lw_spi->begin(PIN_LORA_SCLK, PIN_LORA_MISO, PIN_LORA_MOSI, PIN_LORA_NSS);
-    }
     if (_ybx_lw_module == NULL) {
-        _ybx_lw_module = new Module(PIN_LORA_NSS, PIN_LORA_DIO_1, PIN_LORA_RESET, PIN_LORA_BUSY, *_ybx_lw_spi);
+        Module * mod = _ybx_lw_getModule();
 
         // Conmutador de antena controlado por pines TX ENABLE y RX ENABLE. Igual que en
         // SX126x-Arduino, sólo se usa si ambos pines están definidos. En TX y RX los
         // niveles son los mismos que antes. En reposo RadioLib pone ambos en bajo.
         if (RADIO_RXEN != -1 && RADIO_TXEN != -1) {
-            _ybx_lw_module->setRfSwitchPins(RADIO_RXEN, RADIO_TXEN);
+            mod->setRfSwitchPins(RADIO_RXEN, RADIO_TXEN);
         }
     }
     if (_ybx_lw_sx1262 == NULL) {
@@ -516,6 +583,79 @@ const char * YuboxLoRaWANConfigClass::_chipsetName(void)
 /* ======================================================================== */
 /* [CHIPSET SX1262] Fin de la sección específica del chip de radio           */
 /* ======================================================================== */
+
+#elif defined(YUBOX_LORAWAN_CHIPSET_LR1121)
+
+/* ======================================================================== */
+/* [CHIPSET LR1121] Inicio de la sección específica del chip de radio        */
+/* ======================================================================== */
+
+// El módulo Wio-LR1121 lleva TCXO propio, alimentado por el LR1121 a 1.6 V
+#define YBX_LR1121_TCXO_VOLTAGE     1.6
+
+// Conmutador de RF del Wio-LR1121, gobernado por las salidas DIO5 y DIO6 del
+// propio LR1121. Es la tabla del manual de la Yubox Industrial Mini (sección 7.6),
+// la misma que usa RadioLib para el Wio-WM1110 de Seeed.
+static const uint32_t _ybx_lr1121_rfswitch_pins[Module::RFSWITCH_MAX_PINS] = {
+    RADIOLIB_LR11X0_DIO5, RADIOLIB_LR11X0_DIO6, RADIOLIB_NC, RADIOLIB_NC, RADIOLIB_NC
+};
+static const Module::RfSwitchMode_t _ybx_lr1121_rfswitch_table[] = {
+    // modo                    DIO5  DIO6
+    { LR11x0::MODE_STBY,     { LOW,  LOW  } },
+    { LR11x0::MODE_RX,       { HIGH, LOW  } },
+    { LR11x0::MODE_TX,       { HIGH, HIGH } },
+    { LR11x0::MODE_TX_HP,    { LOW,  HIGH } },
+    { LR11x0::MODE_TX_HF,    { LOW,  LOW  } },
+    { LR11x0::MODE_GNSS,     { LOW,  LOW  } },
+    { LR11x0::MODE_WIFI,     { LOW,  LOW  } },
+    END_OF_MODE_TABLE,
+};
+
+static LR1121 * _ybx_lw_lr1121 = NULL;
+
+bool YuboxLoRaWANConfigClass::_chipsetInitRadio(void)
+{
+    if (_phy != NULL) return true;
+
+    if (_ybx_lw_lr1121 == NULL) {
+        _ybx_lw_lr1121 = new LR1121(_ybx_lw_getModule());
+    }
+
+    // La frecuencia y modulación inicial son irrelevantes, LoRaWAN las reconfigura
+    // en cada transmisión y recepción.
+    int16_t state = _ybx_lw_lr1121->begin(
+        915.0, 125.0, 9, 7,
+        RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE, 10, 8,
+        YBX_LR1121_TCXO_VOLTAGE);
+    if (state != RADIOLIB_ERR_NONE) {
+        log_e("Fallo al inicializar LR1121 - %d", state);
+        return false;
+    }
+
+    // La tabla del conmutador se envía al chip por SPI, y begin() reinicia el chip.
+    // Por lo tanto debe configurarse DESPUÉS de begin(). El chip conserva esta
+    // configuración al dormir.
+    _ybx_lw_lr1121->setRfSwitchTable(_ybx_lr1121_rfswitch_pins, _ybx_lr1121_rfswitch_table);
+
+    _phy = _ybx_lw_lr1121;
+    return true;
+}
+
+void YuboxLoRaWANConfigClass::_chipsetSleepRadio(void)
+{
+    if (_ybx_lw_lr1121 != NULL) _ybx_lw_lr1121->sleep();
+}
+
+const char * YuboxLoRaWANConfigClass::_chipsetName(void)
+{
+    return "LR1121";
+}
+
+/* ======================================================================== */
+/* [CHIPSET LR1121] Fin de la sección específica del chip de radio           */
+/* ======================================================================== */
+
+#endif  // YUBOX_LORAWAN_CHIPSET_xxx
 
 bool YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv, bool displayTxConf)
 {
