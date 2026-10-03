@@ -140,9 +140,11 @@ void lorawan_joined(void)
 
 void lorawan_rx(uint8_t *p, uint8_t n)
 {
-    Serial.print("DEBUG: payload es: [");
-    Serial.write(p, n);
-    Serial.printf("] (%d bytes)\r\n", n);
+    char stringbuf[n+1];
+    memcpy(stringbuf, p, n);
+    stringbuf[n] = '\0';
+
+    log_i("Payload recibido es: [%s] (%d bytes)", stringbuf, n);
 }
 
 String str_payload = "";
