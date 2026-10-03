@@ -47,8 +47,9 @@ preparación estas variables deben NO EXISTIR.
     lwnonces        uint8_t[N]  (interno) Buffer de nonces de RadioLib (DevNonce y JoinNonce). Se conserva al
                                 descartar la sesión, para que el DevNonce siga creciendo. Se borra junto con
                                 las credenciales.
-    lwsession       uint8_t[N]  (interno) Buffer de sesión de RadioLib. Se guarda luego de join, de cada
-                                downlink, de cambio de clase, y cada 32 uplinks.
+    lwsession       uint8_t[N]  (interno) Buffer de sesión de RadioLib. Se guarda luego del join, y después
+                                si hay cambios pendientes, al ocurrir lo primero de: 30 uplinks desde el
+                                último guardado completo, o 300 segundos desde el uplink más reciente.
     lwfcntup        uint32_t    (interno) Siguiente contador de uplink. Se guarda luego de cada uplink para
                                 no reescribir la sesión completa. Al restaurar se usa el mayor valor entre
                                 éste y el de la sesión, más un margen de 2.

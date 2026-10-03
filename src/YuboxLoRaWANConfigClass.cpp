@@ -42,9 +42,13 @@
 #define YBX_LW_CLASSC_POLL_MS               10
 
 // Para reducir desgaste de flash, la sesión completa (~300 bytes) se guarda en NVRAM
-// sólo luego de join, de cada downlink, de cambio de clase, y cada este número de
-// uplinks. En los demás uplinks se guarda sólo el contador de uplink (4 bytes).
-#define YBX_LW_SESSION_FULLSAVE_UPLINKS     32
+// luego del join, y después sólo si tiene cambios pendientes y ocurre lo primero de:
+// - este número de uplinks enviados desde el último guardado completo, o
+// - este número de milisegundos transcurridos desde el uplink más reciente.
+// Los downlinks y cambios de clase sólo marcan la sesión como pendiente de guardar.
+// En cada uplink se guarda además el contador de uplink por separado (4 bytes).
+#define YBX_LW_SESSION_FULLSAVE_UPLINKS     30
+#define YBX_LW_SESSION_FULLSAVE_IDLE_MS     (300 * 1000)
 
 // Al restaurar una sesión, el contador de uplink se adelanta en este valor sobre el
 // máximo valor guardado, por si se transmitió una trama que no alcanzó a guardarse.
@@ -178,6 +182,11 @@ struct YuboxLoRaWANConfigClass::_WorkerCtx
   uint32_t fcntLastFullSave;
   // Último contador de uplink guardado en NVRAM (completo o por separado)
   uint32_t fcntLastSaved;
+
+  // VERDADERO si la sesión en memoria tiene cambios no guardados en NVRAM
+  bool sessionDirty;
+  // Momento del uplink más reciente
+  uint32_t lastSendTs;
 
   // Copia de los últimos nonces guardados, para no reescribir si no cambian
   uint8_t lastNonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
@@ -1454,6 +1463,8 @@ void YuboxLoRaWANConfigClass::_workerLoop(void)
     ctx.joinFails = 0;
     ctx.fcntLastFullSave = 0;
     ctx.fcntLastSaved = 0;
+    ctx.sessionDirty = false;
+    ctx.lastSendTs = 0;
     memset(ctx.lastNonces, 0, sizeof(ctx.lastNonces));
     ctx.classAckPending = false;
     ctx.emptyTxPending = false;
@@ -1470,6 +1481,13 @@ void YuboxLoRaWANConfigClass::_workerLoop(void)
                 wait = 0;
             } else if (ctx.node->getClass() == RADIOLIB_LORAWAN_CLASS_C) {
                 wait = pdMS_TO_TICKS(YBX_LW_CLASSC_POLL_MS);
+            }
+
+            // Despertar a tiempo para guardar la sesión pendiente por inactividad
+            if (ctx.sessionDirty && wait > 0) {
+                int32_t dt = (int32_t)(ctx.lastSendTs + YBX_LW_SESSION_FULLSAVE_IDLE_MS - millis());
+                TickType_t waitSave = (dt > 0) ? pdMS_TO_TICKS(dt) : 0;
+                if (waitSave < wait) wait = waitSave;
             }
         }
         ulTaskNotifyTake(pdTRUE, wait);
@@ -1533,6 +1551,11 @@ void YuboxLoRaWANConfigClass::_workerLoop(void)
             continue;
         }
 
+        if (ctx.sessionDirty && (int32_t)(millis() - (ctx.lastSendTs + YBX_LW_SESSION_FULLSAVE_IDLE_MS)) >= 0) {
+            log_d("Se guarda sesión LoRaWAN pendiente luego de inactividad");
+            _wkSaveSession(ctx, true);
+        }
+
         _wkPollClassC(ctx);
     }
 
@@ -1578,6 +1601,7 @@ void YuboxLoRaWANConfigClass::_wkStartSession(_WorkerCtx & ctx)
     ctx.joinFails = 0;
     ctx.classAckPending = false;
     ctx.emptyTxPending = false;
+    ctx.sessionDirty = false;
 
     if (!_isValidLoRaWANRegion(ctx.params.region)) {
         log_e("Región LoRaWAN %u no soportada", ctx.params.region);
@@ -1729,6 +1753,7 @@ void YuboxLoRaWANConfigClass::_wkUplink(_WorkerCtx & ctx, uint8_t port, const ui
     }
 
     uint8_t classBefore = ctx.node->getClass();
+    uint32_t fcntBefore = ctx.node->getNextFCntUp();
     size_t lenDown = 0;
     LoRaWANEvent_t evUp, evDown;
     memset(&evUp, 0, sizeof(evUp));
@@ -1755,8 +1780,15 @@ void YuboxLoRaWANConfigClass::_wkUplink(_WorkerCtx & ctx, uint8_t port, const ui
         classChanged = _wkHandleDownlink(ctx, evDown.fPort, ctx.downBuf, lenDown);
     }
 
-    bool fullSave = (downlink || classChanged || classBefore != ctx.node->getClass()
-        || (ctx.node->getNextFCntUp() - ctx.fcntLastFullSave >= YBX_LW_SESSION_FULLSAVE_UPLINKS));
+    // RadioLib avanza el contador de uplink sólo si llegó a transmitir
+    if (ctx.node->getNextFCntUp() != fcntBefore) {
+        ctx.lastSendTs = millis();
+        ctx.sessionDirty = true;
+    }
+    if (downlink || classChanged || classBefore != ctx.node->getClass()) ctx.sessionDirty = true;
+
+    bool fullSave = (ctx.sessionDirty
+        && (ctx.node->getNextFCntUp() - ctx.fcntLastFullSave >= YBX_LW_SESSION_FULLSAVE_UPLINKS));
     _wkSaveSession(ctx, fullSave);
     _wkUpdateMaxPayload(ctx);
 
@@ -1786,7 +1818,7 @@ void YuboxLoRaWANConfigClass::_wkPollClassC(_WorkerCtx & ctx)
         if (evDown.fPort != 0 && !evDown.multicast) {
             _wkHandleDownlink(ctx, evDown.fPort, ctx.downBuf, lenDown);
         }
-        _wkSaveSession(ctx, true);
+        ctx.sessionDirty = true;
         _wkUpdateMaxPayload(ctx);
         if (ctx.node->getClass() == RADIOLIB_LORAWAN_CLASS_A) _chipsetSleepRadio();
     } else if (state < RADIOLIB_ERR_NONE) {
@@ -1848,8 +1880,12 @@ void YuboxLoRaWANConfigClass::_wkSaveSession(_WorkerCtx & ctx, bool full)
 
     YuboxLoRaWANLockGuard g(_mtx);
 
-    // Si la sesión se descartó o hay una conexión nueva, no se debe resucitar en NVRAM
-    if (ctx.gen != _wk_gen || ctx.sessionEpoch != _sessionEpoch) return;
+    // Si la sesión se descartó o hay una conexión nueva, no se debe resucitar en NVRAM.
+    // Tampoco tiene sentido seguir reintentando el guardado pendiente.
+    if (ctx.gen != _wk_gen || ctx.sessionEpoch != _sessionEpoch) {
+        ctx.sessionDirty = false;
+        return;
+    }
 
     Preferences nvram;
     nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
@@ -1862,6 +1898,7 @@ void YuboxLoRaWANConfigClass::_wkSaveSession(_WorkerCtx & ctx, bool full)
             log_v("Sesión LoRaWAN guardada (siguiente FCntUp %u)", fcnt);
             ctx.fcntLastFullSave = fcnt;
             ctx.fcntLastSaved = fcnt;
+            ctx.sessionDirty = false;
         } else {
             log_e("No se puede guardar sesión LoRaWAN");
         }
