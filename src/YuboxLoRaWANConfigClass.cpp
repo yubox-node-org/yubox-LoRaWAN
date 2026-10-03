@@ -24,10 +24,6 @@
 
 #define LORAWAN_APP_DEFAULT_TX_DUTYCYCLE 10     /* Default number of seconds for duty cycle */
 
-// Datarate inicial luego de un join OTAA. Es el mismo valor (DR_3) que usaba
-// SX126x-Arduino como LORAWAN_DEFAULT_DATARATE. Con ADR activo, la red lo ajusta.
-#define YBX_LW_DEFAULT_DATARATE             3
-
 // Número total de transmisiones de un uplink confirmado si no se recibe ACK.
 // SX126x-Arduino usaba 8 intentos (1 sólo para AS923), con el mismo contador de trama.
 #define YBX_LW_CONFIRMED_NBTRIALS           8
@@ -1819,11 +1815,11 @@ void YuboxLoRaWANConfigClass::_wkStartSession(_WorkerCtx & ctx)
         return;
     }
 
-    // Se requiere negociar OTAA. Datarate inicial igual al usado con SX126x-Arduino.
-    state = ctx.node->setDatarate(YBX_LW_DEFAULT_DATARATE);
-    if (state != RADIOLIB_ERR_NONE) {
-        log_w("No se puede usar datarate inicial %u (%d), se usa el de RadioLib", YBX_LW_DEFAULT_DATARATE, state);
-    }
+    // Se requiere negociar OTAA. No se fija un datarate inicial, se deja el de RadioLib:
+    // - En bandas de canales fijos (AU915, US915) el datarate del Join-Request lo define
+    //   la banda según el canal (AU915: DR2 en 125 kHz, DR6 en 500 kHz), y queda como
+    //   datarate de uplink luego del join hasta que ADR lo cambie.
+    // - En bandas de canales dinámicos RadioLib usa por omisión DR3.
 
     ctx.st = _WorkerCtx::WK_JOINING;
     ctx.nextJoinTs = millis();
