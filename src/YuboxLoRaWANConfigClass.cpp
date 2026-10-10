@@ -29,10 +29,6 @@
 
 #define LORAWAN_APP_DEFAULT_TX_DUTYCYCLE 10     /* Default number of seconds for duty cycle */
 
-// Número total de transmisiones de un uplink confirmado si no se recibe ACK.
-// SX126x-Arduino usaba 8 intentos (1 sólo para AS923), con el mismo contador de trama.
-#define YBX_LW_CONFIRMED_NBTRIALS           8
-
 // Pausa luego de cada grupo de JOINREQ_NBTRIALS intentos fallidos de join
 #define YBX_LW_JOIN_RETRY_DELAY_MS          2000
 
@@ -107,11 +103,9 @@ static std::vector<YuboxLoRaWAN_rx_List_t> cbRXList;
 const char * YuboxLoRaWANConfigClass::_ns_nvram_yuboxframework_lorawan = "YUBOX/LoRaWAN";
 
 /*
- * Subclase de LoRaWANNode para acceder a dos miembros protegidos de RadioLib:
- * - fCntUp: para adelantar el contador de uplink al restaurar una sesión cuyo
- *   contador se guardó por separado (ver YBX_LW_SESSION_FULLSAVE_UPLINKS).
- * - nbTrans: para retransmitir uplinks confirmados con el mismo contador de trama,
- *   como lo hacía SX126x-Arduino. RadioLib sólo usa el valor que asigna la red.
+ * Subclase de LoRaWANNode para acceder al miembro protegido fCntUp de RadioLib,
+ * y así adelantar el contador de uplink al restaurar una sesión cuyo contador se
+ * guardó por separado (ver YBX_LW_SESSION_FULLSAVE_UPLINKS).
  */
 class YuboxLoRaWANNode final : public LoRaWANNode
 {
@@ -122,9 +116,6 @@ public:
   // Siguiente valor de contador de uplink que se usará
   uint32_t getNextFCntUp(void) { return this->fCntUp; }
   void advanceFCntUp(uint32_t minNext) { if (this->fCntUp < minNext) this->fCntUp = minNext; }
-
-  uint8_t getNbTrans(void) { return this->nbTrans; }
-  void setNbTrans(uint8_t n) { this->nbTrans = n; }
 };
 
 /*
@@ -1965,18 +1956,8 @@ void YuboxLoRaWANConfigClass::_wkUplink(_WorkerCtx & ctx, uint8_t port, const ui
         n = 0;
     }
 
-    // Para uplinks confirmados se fuerzan retransmisiones con el mismo contador de trama
-    uint8_t prevNbTrans = ctx.node->getNbTrans();
-    uint8_t confTrials = 0;
-    if (is_txconfirmed) {
-        confTrials = (ctx.params.region == YBX_LW_REGION_AS923) ? 1 : YBX_LW_CONFIRMED_NBTRIALS;
-        if (confTrials > prevNbTrans) {
-            ctx.node->setNbTrans(confTrials);
-        } else {
-            confTrials = 0;
-        }
-    }
-
+    // El número de transmisiones de cada uplink (NbTrans) es el que asigna la red por
+    // ADR, tanto para uplinks confirmados como no confirmados, según LoRaWAN 1.0.4.
     uint8_t classBefore = ctx.node->getClass();
     uint32_t fcntBefore = ctx.node->getNextFCntUp();
     size_t lenDown = 0;
@@ -1988,9 +1969,6 @@ void YuboxLoRaWANConfigClass::_wkUplink(_WorkerCtx & ctx, uint8_t port, const ui
     _wkReserveRTCFCntUp(ctx);
 
     int16_t state = ctx.node->sendReceive(p, n, port, ctx.downBuf, &lenDown, is_txconfirmed, &evUp, &evDown);
-
-    // Restaurar retransmisiones, salvo que la red las haya cambiado durante el intercambio
-    if (confTrials != 0 && ctx.node->getNbTrans() == confTrials) ctx.node->setNbTrans(prevNbTrans);
 
     bool txOk = (state >= RADIOLIB_ERR_NONE);
     bool downlink = (state > RADIOLIB_ERR_NONE);
