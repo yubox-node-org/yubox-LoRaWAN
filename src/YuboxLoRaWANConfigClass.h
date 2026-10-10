@@ -232,6 +232,13 @@ private:
   bool _wkHandleDownlink(_WorkerCtx &, uint8_t port, const uint8_t * p, size_t n);
   void _wkSaveNonces(_WorkerCtx &);
   void _wkSaveSession(_WorkerCtx &, bool full);
+
+  // Copia de sesión en memoria RTC, complementaria a NVRAM. Son funciones vacías
+  // si se define globalmente YUBOX_LORAWAN_NO_RTCMEM (ver implementación).
+  void _clearRTCSession(void);
+  bool _wkRestoreRTCSession(_WorkerCtx &);
+  void _wkSaveRTCSession(_WorkerCtx &);
+  void _wkReserveRTCFCntUp(_WorkerCtx &);
   void _wkSetJoinStatus(_WorkerCtx &, uint8_t);
   void _wkUpdateMaxPayload(_WorkerCtx &);
   void _wkPostJoined(_WorkerCtx &, bool newSession);

@@ -11,6 +11,11 @@
 
 #include <Preferences.h>
 
+#include <esp_attr.h>
+#ifndef YUBOX_LORAWAN_NO_RTCMEM
+#include <esp_rom_crc.h>
+#endif
+
 #define ARDUINOJSON_USE_LONG_LONG 1
 
 #include "AsyncJson.h"
@@ -208,6 +213,69 @@ public:
   ~YuboxLoRaWANLockGuard() { if (_m != NULL) xSemaphoreGiveRecursive(_m); }
 };
 
+/*
+ * Copia de la sesión LoRaWAN en memoria RTC, complementaria a la de NVRAM.
+ *
+ * La memoria RTC se conserva durante deep-sleep y en todo reinicio que no corte
+ * la energía (esp_restart, panic, watchdog, brownout). Como es RAM, se actualiza
+ * en cada operación que muta la sesión o los contadores sin gastar flash, y al
+ * arrancar la sesión se retoma de inmediato desde esta copia. Si la copia no es
+ * válida (encendido, reset por pin EN, firmware distinto tras OTA) se recurre a
+ * lo guardado en NVRAM, igual que antes.
+ *
+ * Se usa RTC_NOINIT_ATTR y no RTC_DATA_ATTR: el bootloader de ESP-IDF recarga la
+ * sección .rtc.data desde la imagen en todo reinicio que no sea un despertar de
+ * deep-sleep, mientras que .rtc_noinit nunca se toca. Al no inicializarse nunca,
+ * el bloque debe validarse con magic, versión de layout y CRC32 antes de usarse.
+ * Las sumas de 16 bits de RadioLib no bastan para detectar una copia a medias.
+ *
+ * Definir globalmente YUBOX_LORAWAN_NO_RTCMEM (por build flags, igual que la
+ * selección de chipset) desactiva esta copia, para proyectos que requieran la
+ * memoria RTC para otros fines. El bloque ocupa unos 340 bytes.
+ */
+#ifndef YUBOX_LORAWAN_NO_RTCMEM
+#define YBX_LW_RTC_MAGIC                    0x4C584259  // "YBXL"
+#define YBX_LW_RTC_LAYOUT                   1
+
+struct YuboxLoRaWANRTCSession
+{
+  uint32_t magic;
+  uint16_t layout;
+  uint16_t noncesSize;
+  uint16_t sessionSize;
+  uint16_t reserved;
+
+  // Mínimo valor de FCntUp a usar al restaurar. Se adelanta antes de cada
+  // transmisión, por si el reinicio ocurre entre la transmisión y la copia.
+  uint32_t fcntReserved;
+
+  // Contador de uplink al último guardado completo en NVRAM, para que la política
+  // de guardado diferido en flash continúe a través del reinicio.
+  uint32_t fcntLastFullSave;
+
+  uint8_t nonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
+  uint8_t session[RADIOLIB_LORAWAN_SESSION_BUF_SIZE];
+
+  // CRC32 de todos los campos anteriores
+  uint32_t crc;
+};
+static RTC_NOINIT_ATTR YuboxLoRaWANRTCSession _ybx_lw_rtc;
+
+static uint32_t _ybx_lw_rtcCRC(const YuboxLoRaWANRTCSession & r)
+{
+    return esp_rom_crc32_le(0, (const uint8_t *)&r, offsetof(YuboxLoRaWANRTCSession, crc));
+}
+
+static bool _ybx_lw_rtcValid(const YuboxLoRaWANRTCSession & r)
+{
+    return (r.magic == YBX_LW_RTC_MAGIC
+        && r.layout == YBX_LW_RTC_LAYOUT
+        && r.noncesSize == RADIOLIB_LORAWAN_NONCES_BUF_SIZE
+        && r.sessionSize == RADIOLIB_LORAWAN_SESSION_BUF_SIZE
+        && r.crc == _ybx_lw_rtcCRC(r));
+}
+#endif
+
 static void _nvramRemoveIfExists(Preferences & nvram, const char * key)
 {
     if (nvram.isKey(key)) nvram.remove(key);
@@ -311,6 +379,7 @@ void YuboxLoRaWANConfigClass::_destroySessionKeys(Preferences & nvram)
 
     // Invalidar cualquier escritura de sesión en curso por parte de la tarea de radio
     _sessionEpoch++;
+    _clearRTCSession();
 
     // Los nonces se conservan a propósito: el DevNonce debe seguir creciendo
     // entre negociaciones OTAA con las mismas credenciales.
@@ -660,6 +729,12 @@ bool YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv, bool displayTxConf)
     _loadSavedCredentialsFromNVRAM();
     _removeLegacySessionKeys();
     _setupHTTPRoutes(srv);
+
+#ifdef YUBOX_LORAWAN_NO_RTCMEM
+    log_d("Copia de sesión LoRaWAN en memoria RTC desactivada (YUBOX_LORAWAN_NO_RTCMEM)");
+#else
+    log_d("Copia de sesión LoRaWAN en memoria RTC activa (%u bytes)", sizeof(_ybx_lw_rtc));
+#endif
 
     _lorahw_init = _chipsetInitRadio();
     if (!_lorahw_init) {
@@ -1690,6 +1765,7 @@ void YuboxLoRaWANConfigClass::_workerLoop(void)
         if (ctx.sessionDirty && (int32_t)(millis() - (ctx.lastSendTs + YBX_LW_SESSION_FULLSAVE_IDLE_MS)) >= 0) {
             log_d("Se guarda sesión LoRaWAN pendiente luego de inactividad");
             _wkSaveSession(ctx, true);
+            _wkSaveRTCSession(ctx);
         }
 
         _wkPollClassC(ctx);
@@ -1757,11 +1833,16 @@ void YuboxLoRaWANConfigClass::_wkStartSession(_WorkerCtx & ctx)
         return;
     }
 
-    // Recuperar nonces y, si es posible, la sesión completa
+    // Recuperar nonces y, si es posible, la sesión completa. Primero desde la copia
+    // en memoria RTC, que es la más reciente; si no es válida, desde NVRAM.
     bool restored = false;
+    bool fromRTC = false;
     uint32_t savedFCntUp = 0;
     memset(ctx.lastNonces, 0, sizeof(ctx.lastNonces));
-    {
+    if (_wkRestoreRTCSession(ctx)) {
+        restored = true;
+        fromRTC = true;
+    } else {
         Preferences nvram;
         if (nvram.begin(_ns_nvram_yuboxframework_lorawan, true)) {
             if (nvram.getBytesLength(YBX_LW_NVKEY_NONCES) == RADIOLIB_LORAWAN_NONCES_BUF_SIZE) {
@@ -1797,23 +1878,30 @@ void YuboxLoRaWANConfigClass::_wkStartSession(_WorkerCtx & ctx)
     }
 
     if (restored) {
-        // El contador de uplink más reciente puede estar guardado por separado
-        uint32_t fcnt = ctx.node->getNextFCntUp();
-        if (savedFCntUp > fcnt) fcnt = savedFCntUp;
-        ctx.node->advanceFCntUp(fcnt + YBX_LW_FCNTUP_RESTORE_MARGIN);
-        ctx.fcntLastFullSave = ctx.node->getNextFCntUp();
+        if (!fromRTC) {
+            // El contador de uplink más reciente puede estar guardado por separado. La
+            // copia RTC no requiere margen porque reserva el contador antes de transmitir.
+            uint32_t fcnt = ctx.node->getNextFCntUp();
+            if (savedFCntUp > fcnt) fcnt = savedFCntUp;
+            ctx.node->advanceFCntUp(fcnt + YBX_LW_FCNTUP_RESTORE_MARGIN);
+            ctx.fcntLastFullSave = ctx.node->getNextFCntUp();
+        }
         ctx.fcntLastSaved = 0;
 
         ctx.node->setClass(RADIOLIB_LORAWAN_CLASS_A);
         _wkUpdateMaxPayload(ctx);
         _chipsetSleepRadio();
 
-        log_i("Sesión LoRaWAN restaurada desde NVRAM (DevAddr %08x, siguiente FCntUp %u)",
-            ctx.node->getDevAddr(), ctx.node->getNextFCntUp());
+        log_i("Sesión LoRaWAN restaurada desde %s (DevAddr %08x, siguiente FCntUp %u)",
+            fromRTC ? "memoria RTC" : "NVRAM", ctx.node->getDevAddr(), ctx.node->getNextFCntUp());
         ctx.st = _WorkerCtx::WK_JOINED;
+        _wkSaveRTCSession(ctx);
         _wkPostJoined(ctx, false);
         return;
     }
+
+    // Sin sesión que retomar, cualquier copia RTC que exista es obsoleta
+    _clearRTCSession();
 
     // Se requiere negociar OTAA. No se fija un datarate inicial, se deja el de RadioLib:
     // - En bandas de canales fijos (AU915, US915) el datarate del Join-Request lo define
@@ -1842,6 +1930,7 @@ void YuboxLoRaWANConfigClass::_wkJoinAttempt(_WorkerCtx & ctx)
         ctx.joinFails = 0;
         ctx.fcntLastSaved = 0;
         _wkSaveSession(ctx, true);
+        _wkSaveRTCSession(ctx);
         _wkUpdateMaxPayload(ctx);
         _chipsetSleepRadio();
         log_v("Espacio libre en pila de tarea de radio: %u", uxTaskGetStackHighWaterMark(NULL));
@@ -1895,6 +1984,9 @@ void YuboxLoRaWANConfigClass::_wkUplink(_WorkerCtx & ctx, uint8_t port, const ui
     memset(&evUp, 0, sizeof(evUp));
     memset(&evDown, 0, sizeof(evDown));
 
+    // Reservar el contador de trama en la copia RTC por si hay reinicio a mitad del intercambio
+    _wkReserveRTCFCntUp(ctx);
+
     int16_t state = ctx.node->sendReceive(p, n, port, ctx.downBuf, &lenDown, is_txconfirmed, &evUp, &evDown);
 
     // Restaurar retransmisiones, salvo que la red las haya cambiado durante el intercambio
@@ -1926,6 +2018,7 @@ void YuboxLoRaWANConfigClass::_wkUplink(_WorkerCtx & ctx, uint8_t port, const ui
     bool fullSave = (ctx.sessionDirty
         && (ctx.node->getNextFCntUp() - ctx.fcntLastFullSave >= YBX_LW_SESSION_FULLSAVE_UPLINKS));
     _wkSaveSession(ctx, fullSave);
+    _wkSaveRTCSession(ctx);
     _wkUpdateMaxPayload(ctx);
 
     if (!internal) {
@@ -1955,6 +2048,7 @@ void YuboxLoRaWANConfigClass::_wkPollClassC(_WorkerCtx & ctx)
             _wkHandleDownlink(ctx, evDown.fPort, ctx.downBuf, lenDown);
         }
         ctx.sessionDirty = true;
+        _wkSaveRTCSession(ctx);
         _wkUpdateMaxPayload(ctx);
         if (ctx.node->getClass() == RADIOLIB_LORAWAN_CLASS_A) _chipsetSleepRadio();
     } else if (state < RADIOLIB_ERR_NONE) {
@@ -2047,6 +2141,96 @@ void YuboxLoRaWANConfigClass::_wkSaveSession(_WorkerCtx & ctx, bool full)
         }
     }
     nvram.end();
+}
+
+void YuboxLoRaWANConfigClass::_clearRTCSession(void)
+{
+#ifndef YUBOX_LORAWAN_NO_RTCMEM
+    if (_ybx_lw_rtcValid(_ybx_lw_rtc)) log_d("Se descarta copia de sesión LoRaWAN en memoria RTC");
+    memset(&_ybx_lw_rtc, 0, sizeof(_ybx_lw_rtc));
+#endif
+}
+
+bool YuboxLoRaWANConfigClass::_wkRestoreRTCSession(_WorkerCtx & ctx)
+{
+#ifndef YUBOX_LORAWAN_NO_RTCMEM
+    // Se valida una copia local, por si el bloque se invalida desde otra tarea mientras se usa
+    YuboxLoRaWANRTCSession r;
+    memcpy(&r, &_ybx_lw_rtc, sizeof(r));
+    if (!_ybx_lw_rtcValid(r)) {
+        log_d("No hay copia válida de sesión LoRaWAN en memoria RTC");
+        return false;
+    }
+
+    int16_t state = ctx.node->setBufferNonces(r.nonces);
+    if (state != RADIOLIB_ERR_NONE) {
+        log_w("Nonces LoRaWAN en memoria RTC no corresponden a configuración actual (%d), se descartan", state);
+        return false;
+    }
+    state = ctx.node->setBufferSession(r.session);
+    if (state != RADIOLIB_ERR_NONE) {
+        log_w("Sesión LoRaWAN en memoria RTC no es válida (%d), se descarta", state);
+        return false;
+    }
+    state = ctx.node->activateOTAA();
+    if (state != RADIOLIB_LORAWAN_SESSION_RESTORED) {
+        log_w("No se puede activar sesión LoRaWAN de memoria RTC (%d)", state);
+        return false;
+    }
+
+    memcpy(ctx.lastNonces, r.nonces, sizeof(ctx.lastNonces));
+    ctx.node->advanceFCntUp(r.fcntReserved);
+    ctx.fcntLastFullSave = r.fcntLastFullSave;
+    return true;
+#else
+    (void)ctx;
+    return false;
+#endif
+}
+
+void YuboxLoRaWANConfigClass::_wkSaveRTCSession(_WorkerCtx & ctx)
+{
+#ifndef YUBOX_LORAWAN_NO_RTCMEM
+    YuboxLoRaWANLockGuard g(_mtx);
+
+    // Mismas condiciones que para NVRAM: no resucitar una sesión o credenciales descartadas
+    if (ctx.gen != _wk_gen || ctx.sessionEpoch != _sessionEpoch || ctx.credEpoch != _credEpoch) return;
+
+    YuboxLoRaWANRTCSession r;
+    memset(&r, 0, sizeof(r));
+    r.magic = YBX_LW_RTC_MAGIC;
+    r.layout = YBX_LW_RTC_LAYOUT;
+    r.noncesSize = RADIOLIB_LORAWAN_NONCES_BUF_SIZE;
+    r.sessionSize = RADIOLIB_LORAWAN_SESSION_BUF_SIZE;
+    r.fcntReserved = ctx.node->getNextFCntUp();
+    r.fcntLastFullSave = ctx.fcntLastFullSave;
+    memcpy(r.nonces, ctx.node->getBufferNonces(), sizeof(r.nonces));
+    memcpy(r.session, ctx.node->getBufferSession(), sizeof(r.session));
+    r.crc = _ybx_lw_rtcCRC(r);
+
+    // Se invalida antes de copiar, para que un reinicio a mitad de la copia no deje
+    // un bloque mezclado. El CRC es lo último que se escribe.
+    _ybx_lw_rtc.magic = 0;
+    memcpy(&_ybx_lw_rtc, &r, sizeof(r));
+#else
+    (void)ctx;
+#endif
+}
+
+void YuboxLoRaWANConfigClass::_wkReserveRTCFCntUp(_WorkerCtx & ctx)
+{
+#ifndef YUBOX_LORAWAN_NO_RTCMEM
+    YuboxLoRaWANLockGuard g(_mtx);
+    if (ctx.gen != _wk_gen || ctx.sessionEpoch != _sessionEpoch) return;
+    if (!_ybx_lw_rtcValid(_ybx_lw_rtc)) return;
+
+    uint32_t next = ctx.node->getNextFCntUp() + 1;
+    if (_ybx_lw_rtc.fcntReserved >= next) return;
+    _ybx_lw_rtc.fcntReserved = next;
+    _ybx_lw_rtc.crc = _ybx_lw_rtcCRC(_ybx_lw_rtc);
+#else
+    (void)ctx;
+#endif
 }
 
 void YuboxLoRaWANConfigClass::_wkUpdateMaxPayload(_WorkerCtx & ctx)
