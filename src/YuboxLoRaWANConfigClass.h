@@ -170,6 +170,14 @@ private:
 
   struct _WorkerCtx;
 
+  // Callbacks de persistencia de RadioLib 8 (punteros a función sin contexto).
+  // Operan sobre el contexto de la tarea de radio apuntado por _wk_cbCtx.
+  static _WorkerCtx * _wk_cbCtx;
+  static void _cbStorePersistence(uint8_t * buf, size_t len);
+  static void _cbStoreSession(uint8_t * buf, size_t len);
+  static void _cbRestorePersistence(uint8_t * buf, size_t len);
+  static void _cbRestoreSession(uint8_t * buf, size_t len);
+
   void _lock(void);
   void _unlock(void);
 
@@ -230,6 +238,8 @@ private:
   void _wkUplink(_WorkerCtx &, uint8_t port, const uint8_t * p, uint8_t n, bool is_txconfirmed, bool internal);
   void _wkPollClassC(_WorkerCtx &);
   bool _wkHandleDownlink(_WorkerCtx &, uint8_t port, const uint8_t * p, size_t n);
+  int16_t _wkLoadBuffers(_WorkerCtx &, const uint8_t * persist, const uint8_t * session);
+  bool _wkMigrateLegacyNonces(_WorkerCtx &, const uint8_t * legacy);
   void _wkSaveNonces(_WorkerCtx &);
   void _wkSaveSession(_WorkerCtx &, bool full);
 

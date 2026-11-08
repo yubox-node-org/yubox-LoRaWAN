@@ -1,5 +1,5 @@
 Claves NVM usadas para preferencias no-volátiles
-Actualizado al 2026/10/02
+Actualizado al 2026/11/08
 
 Se lista en primer nivel el key del grupo para uso en Preferences.begin()
 y en segundo nivel el key del item, su tipo de dato y su propósito.
@@ -44,12 +44,20 @@ YUBOX/LoRaWAN
 Las siguientes 3 claves están en el namespace YUBOX/LoRaWAN pero NO DEBEN ASIGNARSE externamente porque
 sirven para mantener el estado de sesión LoRaWAN de RadioLib luego de negociar usando OTAA. En flasheo de
 preparación estas variables deben NO EXISTIR.
-    lwnonces        uint8_t[N]  (interno) Buffer de nonces de RadioLib (DevNonce y JoinNonce). Se conserva al
+    lwnonces        uint8_t[N]  (interno) Buffer de persistencia de RadioLib (DevNonce, JoinNonce y estado de
+                                paquetes TS; en RadioLib 7.x se llamaba buffer de nonces). Se conserva al
                                 descartar la sesión, para que el DevNonce siga creciendo. Se borra junto con
-                                las credenciales.
+                                las credenciales. Con RadioLib 8.x mide 32 bytes; con RadioLib 7.x medía 14.
+                                Si al arrancar se encuentra el buffer de 14 bytes de RadioLib 7.x y corresponde
+                                a las credenciales actuales, se migran su DevNonce y JoinNonce (la clave se
+                                reescribe en el formato nuevo en el siguiente intento de join); con cualquier
+                                otro tamaño se borra.
     lwsession       uint8_t[N]  (interno) Buffer de sesión de RadioLib. Se guarda luego del join, y después
                                 si hay cambios pendientes, al ocurrir lo primero de: 30 uplinks desde el
                                 último guardado completo, o 300 segundos desde el uplink más reciente.
+                                Con RadioLib 8.x mide 375 bytes; con RadioLib 7.x medía 302. Un buffer de
+                                tamaño distinto al de la versión de RadioLib compilada es de otra versión y
+                                se borra junto con lwfcntup, con lo que se vuelve a negociar OTAA.
     lwfcntup        uint32_t    (interno) Siguiente contador de uplink. Se guarda luego de cada uplink para
                                 no reescribir la sesión completa. Al restaurar se usa el mayor valor entre
                                 éste y el de la sesión, más un margen de 2.

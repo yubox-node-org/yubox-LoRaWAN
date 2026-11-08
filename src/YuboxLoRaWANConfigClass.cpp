@@ -25,6 +25,12 @@
 #error Esta biblioteca requiere soporte LoRaWAN de RadioLib (RADIOLIB_EXCLUDE_LORAWAN debe ser 0)
 #endif
 
+// RadioLib 8.0.0 cambió el API de persistencia (callbacks en lugar de get/setBuffer*),
+// el layout de los buffers guardados, y la forma de inicializar los radios.
+#if !defined(RADIOLIB_VERSION_MAJOR) || RADIOLIB_VERSION_MAJOR < 8
+#error Esta biblioteca requiere RadioLib 8.0.0 o superior
+#endif
+
 #define JOINREQ_NBTRIALS 3         /**< Number of trials for the join request. */
 
 #define LORAWAN_APP_DEFAULT_TX_DUTYCYCLE 10     /* Default number of seconds for duty cycle */
@@ -38,7 +44,7 @@
 // Intervalo de sondeo de downlinks en clase C
 #define YBX_LW_CLASSC_POLL_MS               10
 
-// Para reducir desgaste de flash, la sesión completa (~300 bytes) se guarda en NVRAM
+// Para reducir desgaste de flash, la sesión completa (~375 bytes) se guarda en NVRAM
 // luego del join, y después sólo si tiene cambios pendientes y ocurre lo primero de:
 // - este número de uplinks enviados desde el último guardado completo, o
 // - este número de milisegundos transcurridos desde el uplink más reciente.
@@ -61,10 +67,26 @@
 #define YBX_LW_TASK_STACK                   8192
 #define YBX_LW_TASK_PRIO                    2
 
-// Claves privadas de NVRAM para persistencia de sesión RadioLib
+// Claves privadas de NVRAM para persistencia de sesión RadioLib. La clave de nonces
+// guarda el buffer que RadioLib 8 llama "de persistencia" (DevNonce, JoinNonce y
+// estado de paquetes TS), que en RadioLib 7.x se llamaba buffer de nonces.
 #define YBX_LW_NVKEY_NONCES                 "lwnonces"
 #define YBX_LW_NVKEY_SESSION                "lwsession"
 #define YBX_LW_NVKEY_FCNTUP                 "lwfcntup"
+
+// Layout del buffer de nonces de RadioLib 7.x (versión 0x0003), que se distingue del
+// buffer de persistencia de RadioLib 8 por su tamaño. Al actualizar se migra de él el
+// DevNonce, para no tener que reiniciar los DevNonce usados en el servidor de red.
+// Los enteros están en orden de bytes little-endian (hton/ntoh de RadioLib).
+#define YBX_LW_LEGACY_NONCES_SIZE           14
+#define YBX_LW_LEGACY_NONCES_VERSION_VAL    0x0003
+#define YBX_LW_LEGACY_NONCES_VERSION        0   // 2 bytes
+#define YBX_LW_LEGACY_NONCES_MODE           2   // 2 bytes
+#define YBX_LW_LEGACY_NONCES_PLAN           4   // 1 byte
+#define YBX_LW_LEGACY_NONCES_CHECKSUM       5   // 2 bytes
+#define YBX_LW_LEGACY_NONCES_DEV_NONCE      7   // 2 bytes
+#define YBX_LW_LEGACY_NONCES_JOIN_NONCE     9   // 3 bytes
+#define YBX_LW_LEGACY_NONCES_SIGNATURE      12  // 2 bytes
 
 // Estado de unión a la red, mismos nombres que reportaba SX126x-Arduino
 enum {
@@ -103,9 +125,12 @@ static std::vector<YuboxLoRaWAN_rx_List_t> cbRXList;
 const char * YuboxLoRaWANConfigClass::_ns_nvram_yuboxframework_lorawan = "YUBOX/LoRaWAN";
 
 /*
- * Subclase de LoRaWANNode para acceder al miembro protegido fCntUp de RadioLib,
- * y así adelantar el contador de uplink al restaurar una sesión cuyo contador se
- * guardó por separado (ver YBX_LW_SESSION_FULLSAVE_UPLINKS).
+ * Subclase de LoRaWANNode para acceder a miembros protegidos de RadioLib:
+ * - fCntUp, para adelantar el contador de uplink al restaurar una sesión cuyo
+ *   contador se guardó por separado (ver YBX_LW_SESSION_FULLSAVE_UPLINKS).
+ * - saveSessionBuffer(), para serializar la sesión en momentos que RadioLib 8 no
+ *   lo hace por sí mismo (cambio de clase, downlink de clase C, ajuste de fCntUp).
+ * - devNonce y joinNonce, para migrar los nonces guardados por RadioLib 7.x.
  */
 class YuboxLoRaWANNode final : public LoRaWANNode
 {
@@ -116,6 +141,21 @@ public:
   // Siguiente valor de contador de uplink que se usará
   uint32_t getNextFCntUp(void) { return this->fCntUp; }
   void advanceFCntUp(uint32_t minNext) { if (this->fCntUp < minNext) this->fCntUp = minNext; }
+
+  // Serializar el estado actual de sesión y entregarlo al callback de guardado de
+  // sesión registrado. RadioLib 8 sólo lo hace por sí mismo en sendReceive() y al
+  // activar la sesión.
+  void flushSessionBuffer(void) { this->saveSessionBuffer(); }
+
+  // Fijar nonces heredados de una versión anterior de RadioLib. Sólo tiene efecto
+  // antes de activar la sesión; RadioLib los guardará en su propio formato en el
+  // siguiente intento de join.
+  void setLegacyNonces(uint16_t dn, uint32_t jn)
+  {
+    if (this->isActivated()) return;
+    this->devNonce = dn;
+    this->joinNonce = jn;
+  }
 };
 
 /*
@@ -180,8 +220,21 @@ struct YuboxLoRaWANConfigClass::_WorkerCtx
   // Momento del uplink más reciente
   uint32_t lastSendTs;
 
-  // Copia de los últimos nonces guardados, para no reescribir si no cambian
-  uint8_t lastNonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
+  // Copia de los últimos nonces guardados en NVRAM, para no reescribir si no cambian
+  uint8_t lastNonces[RADIOLIB_LORAWAN_PERSISTENCE_BUF_SIZE];
+
+  // Copias de los buffers de persistencia (nonces) y de sesión, tal como RadioLib
+  // los entrega a los callbacks de guardado. RadioLib 8 ya no expone estos buffers
+  // directamente: los entrega cuando decide que deben guardarse (y cuando se le pide
+  // con flushSessionBuffer), y los solicita a través de otros callbacks al restaurar.
+  bool persistValid;
+  uint8_t persistBuf[RADIOLIB_LORAWAN_PERSISTENCE_BUF_SIZE];
+  bool sessionValid;
+  uint8_t sessionBuf[RADIOLIB_LORAWAN_SESSION_BUF_SIZE];
+
+  // Buffers a entregar a RadioLib en los callbacks de restauración (NULL si no hay)
+  const uint8_t * restorePersist;
+  const uint8_t * restoreSession;
 
   // Uplink vacío pendiente para informar cambio de clase a la red
   bool classAckPending;
@@ -218,21 +271,26 @@ public:
  * sección .rtc.data desde la imagen en todo reinicio que no sea un despertar de
  * deep-sleep, mientras que .rtc_noinit nunca se toca. Al no inicializarse nunca,
  * el bloque debe validarse con magic, versión de layout y CRC32 antes de usarse.
- * Las sumas de 16 bits de RadioLib no bastan para detectar una copia a medias.
+ * Las sumas de verificación de RadioLib (XOR de palabras) no bastan para detectar
+ * una copia a medias.
+ *
+ * La versión de layout y los tamaños de los buffers cambian con la versión de
+ * RadioLib (el layout 1 correspondía a RadioLib 7.x); un bloque de otra versión se
+ * descarta y se recurre a NVRAM.
  *
  * Definir globalmente YUBOX_LORAWAN_NO_RTCMEM (por build flags, igual que la
  * selección de chipset) desactiva esta copia, para proyectos que requieran la
- * memoria RTC para otros fines. El bloque ocupa unos 340 bytes.
+ * memoria RTC para otros fines. El bloque ocupa unos 430 bytes.
  */
 #ifndef YUBOX_LORAWAN_NO_RTCMEM
 #define YBX_LW_RTC_MAGIC                    0x4C584259  // "YBXL"
-#define YBX_LW_RTC_LAYOUT                   1
+#define YBX_LW_RTC_LAYOUT                   2           // 2: buffers de RadioLib 8
 
 struct YuboxLoRaWANRTCSession
 {
   uint32_t magic;
   uint16_t layout;
-  uint16_t noncesSize;
+  uint16_t persistSize;
   uint16_t sessionSize;
   uint16_t reserved;
 
@@ -244,7 +302,7 @@ struct YuboxLoRaWANRTCSession
   // de guardado diferido en flash continúe a través del reinicio.
   uint32_t fcntLastFullSave;
 
-  uint8_t nonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
+  uint8_t persist[RADIOLIB_LORAWAN_PERSISTENCE_BUF_SIZE];
   uint8_t session[RADIOLIB_LORAWAN_SESSION_BUF_SIZE];
 
   // CRC32 de todos los campos anteriores
@@ -261,7 +319,7 @@ static bool _ybx_lw_rtcValid(const YuboxLoRaWANRTCSession & r)
 {
     return (r.magic == YBX_LW_RTC_MAGIC
         && r.layout == YBX_LW_RTC_LAYOUT
-        && r.noncesSize == RADIOLIB_LORAWAN_NONCES_BUF_SIZE
+        && r.persistSize == RADIOLIB_LORAWAN_PERSISTENCE_BUF_SIZE
         && r.sessionSize == RADIOLIB_LORAWAN_SESSION_BUF_SIZE
         && r.crc == _ybx_lw_rtcCRC(r));
 }
@@ -566,6 +624,21 @@ static Module * _ybx_lw_getModule(void)
     return _ybx_lw_module;
 }
 
+// Configuración LoRa inicial del radio. La frecuencia y modulación son irrelevantes,
+// LoRaWAN las reconfigura en cada transmisión y recepción.
+static ConfigLoRa_t _ybx_lw_initialLoRaConfig(uint8_t syncWord)
+{
+    ConfigLoRa_t cfg;
+    cfg.frequency = RADIOLIB_UNIT_MEGA(915);
+    cfg.bandwidth = RADIOLIB_UNIT_KILO(125);
+    cfg.spreadingFactor = 9;
+    cfg.codingRate = 7;
+    cfg.syncWord = syncWord;
+    cfg.power = 10;
+    cfg.preambleLength = 8;
+    return cfg;
+}
+
 /*
  * Las secciones siguientes son las únicas específicas del chip de radio. Cada
  * una crea el objeto de radio, lo configura, lo duerme y lo nombra. El resto
@@ -580,7 +653,7 @@ static Module * _ybx_lw_getModule(void)
 
 // Configuración idéntica a la usada con SX126x-Arduino: TCXO controlado por DIO3
 // a 3.3 V, regulador DC-DC (no LDO), y DIO2 NO usado como control de antena.
-#define YBX_SX1262_TCXO_VOLTAGE     3.3
+#define YBX_SX1262_TCXO_VOLTAGE     RadioLibTCXOVoltage_t::Voltage3V3
 #define YBX_SX1262_USE_LDO          false
 #define YBX_SX1262_DIO2_RFSWITCH    false
 
@@ -604,12 +677,12 @@ bool YuboxLoRaWANConfigClass::_chipsetInitRadio(void)
         _ybx_lw_sx1262 = new SX1262(_ybx_lw_module);
     }
 
-    // La frecuencia y modulación inicial son irrelevantes, LoRaWAN las reconfigura
-    // en cada transmisión y recepción.
-    int16_t state = _ybx_lw_sx1262->begin(
-        915.0, 125.0, 9, 7,
-        RADIOLIB_SX126X_SYNC_WORD_PRIVATE, 10, 8,
-        YBX_SX1262_TCXO_VOLTAGE, YBX_SX1262_USE_LDO);
+    // En RadioLib 8 el voltaje del TCXO y el tipo de regulador son variables del
+    // objeto de radio, y deben fijarse ANTES de begin().
+    _ybx_lw_sx1262->tcxoVoltage = YBX_SX1262_TCXO_VOLTAGE;
+    _ybx_lw_sx1262->useRegulatorLDO = YBX_SX1262_USE_LDO;
+
+    int16_t state = _ybx_lw_sx1262->begin(_ybx_lw_initialLoRaConfig(RADIOLIB_SX126X_SYNC_WORD_PRIVATE));
     if (state != RADIOLIB_ERR_NONE) {
         log_e("Fallo al inicializar SX1262 - %d", state);
         return false;
@@ -647,7 +720,7 @@ const char * YuboxLoRaWANConfigClass::_chipsetName(void)
 /* ======================================================================== */
 
 // El módulo Wio-LR1121 lleva TCXO propio, alimentado por el LR1121 a 1.6 V
-#define YBX_LR1121_TCXO_VOLTAGE     1.6
+#define YBX_LR1121_TCXO_VOLTAGE     RadioLibTCXOVoltage_t::Voltage1V6
 
 // Conmutador de RF del Wio-LR1121, gobernado por las salidas DIO5 y DIO6 del
 // propio LR1121. Es la tabla del manual de la Yubox Industrial Mini (sección 7.6),
@@ -677,12 +750,11 @@ bool YuboxLoRaWANConfigClass::_chipsetInitRadio(void)
         _ybx_lw_lr1121 = new LR1121(_ybx_lw_getModule());
     }
 
-    // La frecuencia y modulación inicial son irrelevantes, LoRaWAN las reconfigura
-    // en cada transmisión y recepción.
-    int16_t state = _ybx_lw_lr1121->begin(
-        915.0, 125.0, 9, 7,
-        RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE, 10, 8,
-        YBX_LR1121_TCXO_VOLTAGE);
+    // En RadioLib 8 el voltaje del TCXO es una variable del objeto de radio, y debe
+    // fijarse ANTES de begin().
+    _ybx_lw_lr1121->tcxoVoltage = YBX_LR1121_TCXO_VOLTAGE;
+
+    int16_t state = _ybx_lw_lr1121->begin(_ybx_lw_initialLoRaConfig(RADIOLIB_LR11X0_LORA_SYNC_WORD_PRIVATE));
     if (state != RADIOLIB_ERR_NONE) {
         log_e("Fallo al inicializar LR1121 - %d", state);
         return false;
@@ -721,6 +793,7 @@ bool YuboxLoRaWANConfigClass::begin(AsyncWebServer & srv, bool displayTxConf)
     _removeLegacySessionKeys();
     _setupHTTPRoutes(srv);
 
+    log_d("Usando RadioLib %u.%u.%u", RADIOLIB_VERSION_MAJOR, RADIOLIB_VERSION_MINOR, RADIOLIB_VERSION_PATCH);
 #ifdef YUBOX_LORAWAN_NO_RTCMEM
     log_d("Copia de sesión LoRaWAN en memoria RTC desactivada (YUBOX_LORAWAN_NO_RTCMEM)");
 #else
@@ -1668,6 +1741,10 @@ void YuboxLoRaWANConfigClass::_workerLoop(void)
     ctx.sessionDirty = false;
     ctx.lastSendTs = 0;
     memset(ctx.lastNonces, 0, sizeof(ctx.lastNonces));
+    ctx.persistValid = false;
+    ctx.sessionValid = false;
+    ctx.restorePersist = NULL;
+    ctx.restoreSession = NULL;
     ctx.classAckPending = false;
     ctx.emptyTxPending = false;
     ctx.emptyTxPort = LORAWAN_APP_PORT;
@@ -1762,6 +1839,7 @@ void YuboxLoRaWANConfigClass::_workerLoop(void)
         _wkPollClassC(ctx);
     }
 
+    _wk_cbCtx = NULL;
     delete pCtx;
     log_d("Tarea de radio LoRaWAN terminada");
 }
@@ -1813,6 +1891,15 @@ void YuboxLoRaWANConfigClass::_wkStartSession(_WorkerCtx & ctx)
     }
 
     ctx.node = new YuboxLoRaWANNode(_phy, _ybx_lw_regions[ctx.params.region].band, ctx.params.subband);
+    ctx.persistValid = false;
+    ctx.sessionValid = false;
+
+    // RadioLib 8 entrega los buffers a guardar por callbacks. Los de restauración se
+    // registran sólo mientras se restaura (ver _wkLoadBuffers).
+    _wk_cbCtx = &ctx;
+    ctx.node->setCallbackStorePersistence(_cbStorePersistence);
+    ctx.node->setCallbackStoreSession(_cbStoreSession);
+
     ctx.node->setADR(true);
     ctx.node->setDutyCycle(false);
 
@@ -1834,21 +1921,28 @@ void YuboxLoRaWANConfigClass::_wkStartSession(_WorkerCtx & ctx)
         restored = true;
         fromRTC = true;
     } else {
+        // Claves de NVRAM con layout de otra versión de RadioLib, que deben borrarse
+        bool staleNonces = false;
+        bool staleSession = false;
+
         Preferences nvram;
         if (nvram.begin(_ns_nvram_yuboxframework_lorawan, true)) {
-            if (nvram.getBytesLength(YBX_LW_NVKEY_NONCES) == RADIOLIB_LORAWAN_NONCES_BUF_SIZE) {
-                uint8_t nonces[RADIOLIB_LORAWAN_NONCES_BUF_SIZE];
+            size_t noncesLen = nvram.getBytesLength(YBX_LW_NVKEY_NONCES);
+            size_t sessionLen = nvram.getBytesLength(YBX_LW_NVKEY_SESSION);
+
+            if (noncesLen == RADIOLIB_LORAWAN_PERSISTENCE_BUF_SIZE) {
+                uint8_t nonces[RADIOLIB_LORAWAN_PERSISTENCE_BUF_SIZE];
                 nvram.getBytes(YBX_LW_NVKEY_NONCES, nonces, sizeof(nonces));
-                state = ctx.node->setBufferNonces(nonces);
+                state = _wkLoadBuffers(ctx, nonces, NULL);
                 if (state != RADIOLIB_ERR_NONE) {
                     log_w("Nonces LoRaWAN guardados no corresponden a configuración actual (%d), se descartan", state);
                 } else {
                     memcpy(ctx.lastNonces, nonces, sizeof(nonces));
 
-                    if (nvram.getBytesLength(YBX_LW_NVKEY_SESSION) == RADIOLIB_LORAWAN_SESSION_BUF_SIZE) {
+                    if (sessionLen == RADIOLIB_LORAWAN_SESSION_BUF_SIZE) {
                         uint8_t * session = new uint8_t[RADIOLIB_LORAWAN_SESSION_BUF_SIZE];
                         nvram.getBytes(YBX_LW_NVKEY_SESSION, session, RADIOLIB_LORAWAN_SESSION_BUF_SIZE);
-                        state = ctx.node->setBufferSession(session);
+                        state = _wkLoadBuffers(ctx, NULL, session);
                         delete[] session;
                         if (state != RADIOLIB_ERR_NONE) {
                             log_w("Sesión LoRaWAN guardada no es válida (%d), se descarta", state);
@@ -1860,11 +1954,46 @@ void YuboxLoRaWANConfigClass::_wkStartSession(_WorkerCtx & ctx)
                                 log_w("No se puede activar sesión LoRaWAN guardada (%d)", state);
                             }
                         }
+                    } else if (sessionLen > 0) {
+                        staleSession = true;
                     }
                     savedFCntUp = nvram.getUInt(YBX_LW_NVKEY_FCNTUP, 0);
                 }
+            } else if (noncesLen == YBX_LW_LEGACY_NONCES_SIZE) {
+                // Buffer de nonces de RadioLib 7.x. Se migra el DevNonce para que siga
+                // creciendo y no haya que reiniciar los DevNonce usados en el servidor
+                // de red. La sesión guardada por esa versión tiene otro layout y no se
+                // puede restaurar, así que se negociará OTAA.
+                uint8_t legacy[YBX_LW_LEGACY_NONCES_SIZE];
+                nvram.getBytes(YBX_LW_NVKEY_NONCES, legacy, sizeof(legacy));
+                if (!_wkMigrateLegacyNonces(ctx, legacy)) {
+                    log_w("Nonces LoRaWAN de RadioLib 7.x no corresponden a configuración actual, se descartan");
+                    staleNonces = true;
+                }
+                if (sessionLen > 0) staleSession = true;
+            } else if (noncesLen > 0) {
+                log_w("Nonces LoRaWAN guardados tienen tamaño desconocido (%u bytes), se descartan", noncesLen);
+                staleNonces = true;
+                if (sessionLen > 0) staleSession = true;
             }
             nvram.end();
+        }
+
+        if (staleNonces || staleSession) {
+            // Borrar claves nunca resucita datos descartados, así que no hace falta
+            // verificar las épocas de NVRAM. Los nonces migrados se escriben en el
+            // formato nuevo en el siguiente intento de join.
+            if (staleSession) {
+                log_w("Sesión LoRaWAN guardada tiene layout de otra versión de RadioLib, se descarta y se negociará OTAA");
+            }
+            if (nvram.begin(_ns_nvram_yuboxframework_lorawan, false)) {
+                if (staleNonces) _nvramRemoveIfExists(nvram, YBX_LW_NVKEY_NONCES);
+                if (staleSession) {
+                    _nvramRemoveIfExists(nvram, YBX_LW_NVKEY_SESSION);
+                    _nvramRemoveIfExists(nvram, YBX_LW_NVKEY_FCNTUP);
+                }
+                nvram.end();
+            }
         }
     }
 
@@ -2002,8 +2131,10 @@ void YuboxLoRaWANConfigClass::_wkUplink(_WorkerCtx & ctx, uint8_t port, const ui
     if (!internal) {
         _wkPostTXResult(ctx, txOk, is_txconfirmed, ackOk);
 
-        // Ver NOTA en send() sobre negociación de payload mayor
-        if (state == RADIOLIB_ERR_PACKET_TOO_LONG) {
+        // Ver NOTA en send() sobre negociación de payload mayor. RadioLib 8 distingue
+        // el caso en que el payload sólo excede el máximo por las respuestas MAC
+        // pendientes; el uplink vacío las envía y libera el espacio.
+        if (state == RADIOLIB_ERR_PACKET_TOO_LONG || state == RADIOLIB_ERR_MAC_ANSWERS_PENDING) {
             ctx.emptyTxPending = true;
             ctx.emptyTxPort = port;
         }
@@ -2061,10 +2192,154 @@ bool YuboxLoRaWANConfigClass::_wkHandleDownlink(_WorkerCtx & ctx, uint8_t port, 
     return false;
 }
 
+/* ======================================================================== */
+/* Persistencia con RadioLib 8. RadioLib ya no expone sus buffers de nonces  */
+/* y de sesión: los entrega por callbacks cuando cambian, y los pide por      */
+/* callbacks al restaurar con loadBuffers(). Los callbacks son punteros a     */
+/* función sin contexto, así que operan sobre el contexto de la única tarea   */
+/* de radio (_wk_cbCtx). RadioLib los invoca de forma síncrona desde métodos  */
+/* del nodo, que sólo se llaman desde esa tarea.                              */
+/* ======================================================================== */
+
+YuboxLoRaWANConfigClass::_WorkerCtx * YuboxLoRaWANConfigClass::_wk_cbCtx = NULL;
+
+void YuboxLoRaWANConfigClass::_cbStorePersistence(uint8_t * buf, size_t len)
+{
+    _WorkerCtx * ctx = _wk_cbCtx;
+    if (ctx == NULL || buf == NULL || len != sizeof(ctx->persistBuf)) return;
+    memcpy(ctx->persistBuf, buf, len);
+    ctx->persistValid = true;
+}
+
+void YuboxLoRaWANConfigClass::_cbStoreSession(uint8_t * buf, size_t len)
+{
+    _WorkerCtx * ctx = _wk_cbCtx;
+    if (ctx == NULL || buf == NULL || len != sizeof(ctx->sessionBuf)) return;
+    memcpy(ctx->sessionBuf, buf, len);
+    ctx->sessionValid = true;
+}
+
+void YuboxLoRaWANConfigClass::_cbRestorePersistence(uint8_t * buf, size_t len)
+{
+    _WorkerCtx * ctx = _wk_cbCtx;
+    if (buf == NULL) return;
+    if (ctx != NULL && ctx->restorePersist != NULL && len == sizeof(ctx->persistBuf)) {
+        memcpy(buf, ctx->restorePersist, len);
+    } else {
+        // RadioLib rechaza un buffer todo en ceros como no válido
+        memset(buf, 0, len);
+    }
+}
+
+void YuboxLoRaWANConfigClass::_cbRestoreSession(uint8_t * buf, size_t len)
+{
+    _WorkerCtx * ctx = _wk_cbCtx;
+    if (buf == NULL) return;
+    if (ctx != NULL && ctx->restoreSession != NULL && len == sizeof(ctx->sessionBuf)) {
+        memcpy(buf, ctx->restoreSession, len);
+    } else {
+        memset(buf, 0, len);
+    }
+}
+
+/*
+ * Entregar a RadioLib el buffer de persistencia (nonces) y/o el de sesión a restaurar.
+ * Se hace en dos llamadas a loadBuffers() para distinguir cuál de los dos falló, ya
+ * que RadioLib restaura el de sesión sólo si el de persistencia fue aceptado. Si la
+ * restauración es exitosa, las copias locales quedan iguales a las de RadioLib. Si
+ * se restaura una sesión, queda pendiente de activar con activateOTAA().
+ */
+int16_t YuboxLoRaWANConfigClass::_wkLoadBuffers(_WorkerCtx & ctx, const uint8_t * persist, const uint8_t * session)
+{
+    int16_t state = RADIOLIB_ERR_NONE;
+    _wk_cbCtx = &ctx;
+
+    if (persist != NULL) {
+        ctx.restorePersist = persist;
+        ctx.restoreSession = NULL;
+        ctx.node->setCallbackRestorePersistence(_cbRestorePersistence);
+        ctx.node->setCallbackRestoreSession(NULL);
+        state = ctx.node->loadBuffers();
+        ctx.restorePersist = NULL;
+        if (state == RADIOLIB_ERR_NONE) {
+            memcpy(ctx.persistBuf, persist, sizeof(ctx.persistBuf));
+            ctx.persistValid = true;
+        }
+    }
+    if (state == RADIOLIB_ERR_NONE && session != NULL) {
+        ctx.restorePersist = NULL;
+        ctx.restoreSession = session;
+        ctx.node->setCallbackRestorePersistence(NULL);
+        ctx.node->setCallbackRestoreSession(_cbRestoreSession);
+        state = ctx.node->loadBuffers();
+        ctx.restoreSession = NULL;
+        if (state == RADIOLIB_ERR_NONE) {
+            memcpy(ctx.sessionBuf, session, sizeof(ctx.sessionBuf));
+            ctx.sessionValid = true;
+        }
+    }
+
+    ctx.node->setCallbackRestorePersistence(NULL);
+    ctx.node->setCallbackRestoreSession(NULL);
+    return state;
+}
+
+// Suma de verificación de 16 bits de RadioLib 7.x: XOR de palabras big-endian
+static uint16_t _ybx_lw_legacyCheckSum16(const uint8_t * p, size_t n)
+{
+    uint16_t cs = 0;
+    for (size_t i = 0; i < n; i += 2) {
+        uint16_t w = ((uint16_t)p[i]) << 8;
+        if (i + 1 < n) w |= p[i + 1];
+        cs ^= w;
+    }
+    return cs;
+}
+
+// Entero little-endian de n bytes, como lo escribía hton() de RadioLib 7.x
+static uint32_t _ybx_lw_legacyLE(const uint8_t * p, size_t n)
+{
+    uint32_t v = 0;
+    for (size_t i = 0; i < n; i++) v |= ((uint32_t)p[i]) << (8 * i);
+    return v;
+}
+
+/*
+ * Validar un buffer de nonces de RadioLib 7.x contra las credenciales actuales, y
+ * si corresponde, fijar su DevNonce y JoinNonce en el nodo antes del join OTAA.
+ */
+bool YuboxLoRaWANConfigClass::_wkMigrateLegacyNonces(_WorkerCtx & ctx, const uint8_t * legacy)
+{
+    if (_ybx_lw_legacyLE(&legacy[YBX_LW_LEGACY_NONCES_VERSION], 2) != YBX_LW_LEGACY_NONCES_VERSION_VAL) return false;
+    if (_ybx_lw_legacyLE(&legacy[YBX_LW_LEGACY_NONCES_SIGNATURE], 2)
+        != _ybx_lw_legacyCheckSum16(legacy, YBX_LW_LEGACY_NONCES_SIGNATURE)) return false;
+    if (_ybx_lw_legacyLE(&legacy[YBX_LW_LEGACY_NONCES_MODE], 2) != RADIOLIB_LORAWAN_MODE_OTAA) return false;
+
+    // Suma de verificación de credenciales como la calculaba RadioLib 7.x: sobre los
+    // bytes en memoria de los EUI como enteros de 64 bits, y sobre la AppKey.
+    uint64_t joinEUI = _eui2u64(ctx.params.appEUI);
+    uint64_t devEUI = _eui2u64(ctx.params.devEUI);
+    uint16_t keyCheckSum = 0;
+    keyCheckSum ^= _ybx_lw_legacyCheckSum16((const uint8_t *)&joinEUI, sizeof(joinEUI));
+    keyCheckSum ^= _ybx_lw_legacyCheckSum16((const uint8_t *)&devEUI, sizeof(devEUI));
+    keyCheckSum ^= _ybx_lw_legacyCheckSum16(ctx.params.appKey, sizeof(ctx.params.appKey));
+    if (_ybx_lw_legacyLE(&legacy[YBX_LW_LEGACY_NONCES_CHECKSUM], 2) != keyCheckSum) return false;
+
+    // No se compara el plan de banda: el DevNonce debe seguir creciendo para el mismo
+    // DevEUI aunque cambie la región.
+    uint16_t devNonce = (uint16_t)_ybx_lw_legacyLE(&legacy[YBX_LW_LEGACY_NONCES_DEV_NONCE], 2);
+    uint32_t joinNonce = _ybx_lw_legacyLE(&legacy[YBX_LW_LEGACY_NONCES_JOIN_NONCE], 3);
+    ctx.node->setLegacyNonces(devNonce, joinNonce);
+    log_w("Nonces LoRaWAN de RadioLib 7.x migrados a RadioLib 8 (DevNonce %u), se negociará OTAA", devNonce);
+    return true;
+}
+
 void YuboxLoRaWANConfigClass::_wkSaveNonces(_WorkerCtx & ctx)
 {
-    uint8_t * nonces = ctx.node->getBufferNonces();
-    if (0 == memcmp(nonces, ctx.lastNonces, RADIOLIB_LORAWAN_NONCES_BUF_SIZE)) return;
+    // RadioLib entrega el buffer de persistencia al callback cada vez que cambia el
+    // DevNonce o el JoinNonce. Si todavía no lo ha entregado, no hay nada que guardar.
+    if (!ctx.persistValid) return;
+    if (0 == memcmp(ctx.persistBuf, ctx.lastNonces, sizeof(ctx.persistBuf))) return;
 
     YuboxLoRaWANLockGuard g(_mtx);
 
@@ -2073,8 +2348,8 @@ void YuboxLoRaWANConfigClass::_wkSaveNonces(_WorkerCtx & ctx)
 
     Preferences nvram;
     nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
-    if (nvram.putBytes(YBX_LW_NVKEY_NONCES, nonces, RADIOLIB_LORAWAN_NONCES_BUF_SIZE) == RADIOLIB_LORAWAN_NONCES_BUF_SIZE) {
-        memcpy(ctx.lastNonces, nonces, RADIOLIB_LORAWAN_NONCES_BUF_SIZE);
+    if (nvram.putBytes(YBX_LW_NVKEY_NONCES, ctx.persistBuf, sizeof(ctx.persistBuf)) == sizeof(ctx.persistBuf)) {
+        memcpy(ctx.lastNonces, ctx.persistBuf, sizeof(ctx.persistBuf));
     } else {
         log_e("No se pueden guardar nonces LoRaWAN");
     }
@@ -2098,10 +2373,14 @@ void YuboxLoRaWANConfigClass::_wkSaveSession(_WorkerCtx & ctx, bool full)
     Preferences nvram;
     nvram.begin(_ns_nvram_yuboxframework_lorawan, false);
     if (full) {
-        uint8_t * session = ctx.node->getBufferSession();
+        // Pedir a RadioLib que serialice el estado actual de la sesión (lo entrega al
+        // callback de guardado, que actualiza ctx.sessionBuf).
+        ctx.node->flushSessionBuffer();
+
         // El contador separado se reescribe también, para que nunca quede un valor de
         // una sesión anterior que adelante indebidamente el contador al restaurar.
-        if (nvram.putBytes(YBX_LW_NVKEY_SESSION, session, RADIOLIB_LORAWAN_SESSION_BUF_SIZE) == RADIOLIB_LORAWAN_SESSION_BUF_SIZE
+        if (ctx.sessionValid
+            && nvram.putBytes(YBX_LW_NVKEY_SESSION, ctx.sessionBuf, sizeof(ctx.sessionBuf)) == sizeof(ctx.sessionBuf)
             && nvram.putUInt(YBX_LW_NVKEY_FCNTUP, fcnt)) {
             log_v("Sesión LoRaWAN guardada (siguiente FCntUp %u)", fcnt);
             ctx.fcntLastFullSave = fcnt;
@@ -2140,14 +2419,9 @@ bool YuboxLoRaWANConfigClass::_wkRestoreRTCSession(_WorkerCtx & ctx)
         return false;
     }
 
-    int16_t state = ctx.node->setBufferNonces(r.nonces);
+    int16_t state = _wkLoadBuffers(ctx, r.persist, r.session);
     if (state != RADIOLIB_ERR_NONE) {
-        log_w("Nonces LoRaWAN en memoria RTC no corresponden a configuración actual (%d), se descartan", state);
-        return false;
-    }
-    state = ctx.node->setBufferSession(r.session);
-    if (state != RADIOLIB_ERR_NONE) {
-        log_w("Sesión LoRaWAN en memoria RTC no es válida (%d), se descarta", state);
+        log_w("Copia de sesión LoRaWAN en memoria RTC no corresponde a configuración actual (%d), se descarta", state);
         return false;
     }
     state = ctx.node->activateOTAA();
@@ -2156,7 +2430,7 @@ bool YuboxLoRaWANConfigClass::_wkRestoreRTCSession(_WorkerCtx & ctx)
         return false;
     }
 
-    memcpy(ctx.lastNonces, r.nonces, sizeof(ctx.lastNonces));
+    memcpy(ctx.lastNonces, r.persist, sizeof(ctx.lastNonces));
     ctx.node->advanceFCntUp(r.fcntReserved);
     ctx.fcntLastFullSave = r.fcntLastFullSave;
     return true;
@@ -2174,16 +2448,20 @@ void YuboxLoRaWANConfigClass::_wkSaveRTCSession(_WorkerCtx & ctx)
     // Mismas condiciones que para NVRAM: no resucitar una sesión o credenciales descartadas
     if (ctx.gen != _wk_gen || ctx.sessionEpoch != _sessionEpoch || ctx.credEpoch != _credEpoch) return;
 
+    // Serializar el estado actual de la sesión (actualiza ctx.sessionBuf)
+    ctx.node->flushSessionBuffer();
+    if (!ctx.persistValid || !ctx.sessionValid) return;
+
     YuboxLoRaWANRTCSession r;
     memset(&r, 0, sizeof(r));
     r.magic = YBX_LW_RTC_MAGIC;
     r.layout = YBX_LW_RTC_LAYOUT;
-    r.noncesSize = RADIOLIB_LORAWAN_NONCES_BUF_SIZE;
+    r.persistSize = RADIOLIB_LORAWAN_PERSISTENCE_BUF_SIZE;
     r.sessionSize = RADIOLIB_LORAWAN_SESSION_BUF_SIZE;
     r.fcntReserved = ctx.node->getNextFCntUp();
     r.fcntLastFullSave = ctx.fcntLastFullSave;
-    memcpy(r.nonces, ctx.node->getBufferNonces(), sizeof(r.nonces));
-    memcpy(r.session, ctx.node->getBufferSession(), sizeof(r.session));
+    memcpy(r.persist, ctx.persistBuf, sizeof(r.persist));
+    memcpy(r.session, ctx.sessionBuf, sizeof(r.session));
     r.crc = _ybx_lw_rtcCRC(r);
 
     // Se invalida antes de copiar, para que un reinicio a mitad de la copia no deje
