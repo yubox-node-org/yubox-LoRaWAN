@@ -624,6 +624,36 @@ static Module * _ybx_lw_getModule(void)
     return _ybx_lw_module;
 }
 
+// Espera que RadioLib usa, en lugar de su bucle de yield(), para todo intervalo mayor
+// a RADIOLIB_LORAWAN_DELAY_SLEEP_THRESHOLD (10 ms): la espera hasta abrir una ventana
+// RX, la espera de TxDone y la duración de la ventana RX. El bucle original nunca
+// bloquea; como la tarea de radio tiene prioridad mayor que IDLE0, en la espera de 5 s
+// previa a RX1 de un Join-Request IDLE0 no llega a ejecutarse y el watchdog de tarea
+// (5 s) reinicia el equipo. Aquí se cede el procesador con vTaskDelay() casi todo el
+// intervalo y se afinan con millis() los últimos milisegundos, porque RadioLib exige
+// precisión de 1 ms para no perder downlinks.
+//
+// Cuando RadioLib espera TxDone o el fin de una ventana RX, su bucle original terminaba
+// apenas disparaba la interrupción de DIO1. Esa bandera no es visible desde aquí, así
+// que se vigila el nivel del pin IRQ: si estaba bajo al entrar y sube, se retorna de
+// inmediato. En la espera previa a una ventana el radio está dormido con las IRQ ya
+// limpias, el pin permanece bajo y la espera se cumple completa.
+static void _ybx_lw_sleepDelay(RadioLibTime_t ms)
+{
+    uint32_t t0 = millis();
+    bool irqArmed = (digitalRead(PIN_LORA_IRQ) == LOW);
+    while (true) {
+        uint32_t elapsed = millis() - t0;
+        if (elapsed >= ms) return;
+        if (irqArmed && digitalRead(PIN_LORA_IRQ) == HIGH) return;
+        if (ms - elapsed > 2) {
+            vTaskDelay(1);
+        } else {
+            yield();
+        }
+    }
+}
+
 // Configuración LoRa inicial del radio. La frecuencia y modulación son irrelevantes,
 // LoRaWAN las reconfigura en cada transmisión y recepción.
 static ConfigLoRa_t _ybx_lw_initialLoRaConfig(uint8_t syncWord)
@@ -1902,6 +1932,12 @@ void YuboxLoRaWANConfigClass::_wkStartSession(_WorkerCtx & ctx)
 
     ctx.node->setADR(true);
     ctx.node->setDutyCycle(false);
+
+    // Espera bloqueante para no privar de CPU a IDLE0 (ver _ybx_lw_sleepDelay). La
+    // detección de TxDone por nivel de pin puede llegar hasta 1 ms (un tick) después
+    // que la interrupción; se ensancha la ventana RX en esa medida para compensar.
+    ctx.node->setSleepFunction(_ybx_lw_sleepDelay);
+    ctx.node->scanGuardA = 2;
 
     // LoRaWAN 1.0.x: sin NwkKey, sólo AppKey (igual que SX126x-Arduino)
     int16_t state = ctx.node->beginOTAA(_eui2u64(ctx.params.appEUI), _eui2u64(ctx.params.devEUI), NULL, ctx.params.appKey);
